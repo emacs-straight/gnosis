@@ -1,0 +1,230 @@
+
++ [[https://thanosapollo.org/projects/gnosis/][Homepage]]
++ [[https://git.thanosapollo.org/gnosis/][Upstream]]
++ [[https://thanosapollo.org/log/gnosis/][Changelog]]
+
+* 0.7.0
+#+DATE: 2026/02/24
+** New features
++ Review topic from dashboard nodes view (~r~), with configurable
+  forward-link and backlink depth (~R~ or ~C-u r~).
++ ~gnosis-review-topic~ accepts separate forward/backlink depth to
+  include themata from related nodes.
++ ~gnosis-save-hook~ runs after saving a thema, called with the
+  thema ID.
++ Link integrity detection and repair commands
+  (~gnosis-links-check~, ~gnosis-links-sync~).
++ Dashboard maintenance menu for syncing/rebuilding nodes and link
+  health checks.
++ Dashboard shows themata with orphaned links.
++ View due org-gnosis nodes linked to themata from dashboard.
++ Bulk replace string in keimenon with org-gnosis node link.
++ Custom ~gnosis-center-content-during-review~ option.
++ Delete action available during review.
++ Format org-gnosis links in keimenon during review output.
++ Export deck option to include or exclude suspended themata.
++ Exported decks include a =#+THEMATA:= header with thema count.
++ Importing into an existing deck prompts for confirmation.
++ Failed thema imports report the source file line number.
+
+** Dashboard
++ Added nodes dashboard, view org-gnosis nodes information including
+  backlinks and linked themata as well as start a review session.
++ Suspend column displays =Yes= =No= instead of =1= =0=.
++ Flatten Actions submenu into the home menu.
++ Separate Import/Export into its own menu column.
++ Four-column layout: Navigate, Actions, Import/Export, Maintenance.
+
+
+** Algorithm
++ Cap gnosis-synolon at =gnosis-algorithm-synolon-max= (default 3.0),
+  floor at 1.3.
++ Add interval fuzz to prevent review clustering.
++ Fix lethe event: properly reduce gnosis-plus on consecutive failures.
+
+** Performance
++ Dashboard suspend, delete, and edit update only the affected entry
+  instead of refreshing the entire buffer.
++ Dashboard nodes view uses bulk queries for link counts (2 queries
+  instead of 2N).
++ Deck export uses 2 bulk queries instead of 2 per thema (N+1 eliminated).
++ Deck export uses plain text insertion instead of per-thema buffer scans (O(n^2) eliminated).
++ Deck import wraps all operations in a single transaction with
+  pre-cached IDs (10K fsyncs reduced to 1).
++ Review updates use a single DB query.
++ Tag output uses a single DB call.
++ Average daily reviews computed with a single DB call.
+
+** Bug fixes
++ Fix ~gnosis-monkeytype~ hook leak (now buffer-local).
++ Fix ~vc-pull~ to reopen database properly after successful pull.
++ Pre-load ~emacsql-sqlite-builtin~ to fix ~cl-generic~ dispatch crash
+  on Emacs 29+.
+
+** Documentation
++ Update Introduction to describe the intended workflow with =org-gnosis=
+  (write notes, create themata, link, review).
++ Document the two separate databases (gnosis and org-gnosis).
++ Update dashboard section for new menu layout.
++ Add Import & Export section with export options and import behavior.
+
+* 0.6.0
+#+DATE: 2026/01/26
+** New features
++ View links to org-gnosis nodes during review.
++ /Monkeytype/ wrong answers upon failed recalls.
+
+** gnosis-modeline-mode
++ Add 'warning face property for due themata indication.
+
+** cloze themata
++ [fix] Properly center keimenon during reviews.
+
+** Other
++ gnosis-cloze-string value defaults to ="(...)"=.
+
+* 0.5.8
+#+DATE: 2025/11/08
++ Update database to version 5.
++ Restructure gnosis modules.
++ Add monkeytype functionality.
+* 0.5.7
+#+DATE: 2025/10/25
++ Resolve issues relating to selecting multiple questions on
+  dashboard.
++ Resolve issues for suspending content.
++ Improve performance for suspending multiple questions
+
+* 0.5.6
+#+DATE: 2025/10/13
++ Fix issues for clozes with multiple identical answers.
++ Improve performance for suspending multiple notes via the dashboard.
++ Display newlines when reviewing notes.
++ Add feature to mark all notes present at current dashboard.
+
+* 0.5.5
+#+DATE: 2025/08/13
++ Performance improvements for un/suspending decks.
++ Minor bug fixes & adjustments.
+* 0.5.4
+#+DATE: 2025/08/01
++ New feature: open of file links in a new buffer.
+  + This can be used to view images or pdf/ebooks.
++ Change syntax highlighting to org mode.
++ Quitting viewing notes/decks returns to dashboard home page.
++ Minor bug fixes & adjustments on dashboard.
+* 0.5.3
+#+DATE: 2025/07/02
++ Fix gnosis algorithm bug for failed reviews with custom amnesia
+  value of lower than 0.5.
++ Update documentation.
+
+* 0.5.2
+#+DATE: 2025/06/30
++ Fix importing deck issues with non-new gnosis ids.
++ Minor aesthetic changes on review header.
++ Remove modeline review indication when due reviews are 0.
+
+* 0.5.1
+#+DATE: 2025/06/18
++ Minor bug fixes & documentation update.
+
+* 0.5.0
+#+DATE: 2025/06/17
+[[http://thanosapollo.org/posts/gnosis-0-5-0-release/][Announcement post]]
+
++ Major rewrite of gnosis database
+  + All columns have the same value types
+  + Every note (/thema/) type will consist of
+    + *keimenon* (passage/document) a string value.
+    + *hypothesis* assumption/hint, string value related to keimenon
+      to help finding the right answer.
+    + *answer*, a string value, self explanatory.
+    + *parathema*, a string value, the "extras" with emphasis on adding
++ =Drop support for images=
+  + Image support will be rewritten in the next minor version, to
+    support them as file links via keimenon.
++ =Drop support y-or-n notes=
+  + With this update your current y-or-n notes will be converted into
+    MCQ type, with "Yes" & "No" choices.
++ =Support for org-mode=
+  + Create & edit notes in an org-mode buffer, replacing previous
+    emacs-lisp implementation.
+  + Export decks as org-mode files
+  + Import & Edit decks as org-mode files
++ =Support for linking gnosis notes with org-gnosis notes.=
+  + Adding an org link to either the keimenon or parathema of a gnosis
+    note to an [[https://thanosapollo.org/projects/org-gnosis/][org-gnosis]] note will link said notes, this way you can
+    do review gnosis notes that are related to a specific topic/note
+    of org-gnosis.
+
+* 0.4.10
+#+DATE: 2025/12/10
++ Implement major performance improvements in gnosis-dashboard.
+
+* 0.4.9
+#+DATE: 2024/12/10
+- Implement asynchronous dashboard creation
+- Minor bug fixes
+
+* 0.4.8
+#+DATE: 2024/11/08
++ Refactor average review output
+
+* 0.4.7
+#+DATE: 2024/11/07
++ Optimized performance for dashboard homepage
++ Fix face issues on emacs-30
+
+* 0.4.6
+#+DATE: 2024/10/23
++ Refactor gnosis-dashboard without using widgets
++ Improve searching of gnosis notes within dashboard
+
+* 0.4.5
+#+DATE: 2024/10/09
++ Fix cloze hint removal issues.
++ Update documentation
+  + Add Contributing section
++ Refactor gnosis-dashboard module as part of gnosis.el
+
+* 0.4.4
+#+DATE: 2024/10/06
++ Add clear-history.
++ *Refactor* review actions to use read-char-choice.
+  + This is done to allow users to switch buffers during review,
+    something that couldn't be done with read-multiple-choice
++ Add documentation for interactions with other software
+  + Add documentation for using gnosis with =emacs-no-literring=.
+
+* 0.4.3
+#+DATE: 2024/09/06
++ Fix breaking changes for editing cloze notes.
++ Refactor calculation of dates in gnosis algorithm.
+
+* 0.4.2.
+#+DATE: 2024/09/05
++ Fix display issues on non-grapical interface.
++ Add variable watchers for custom algorithm values.
++ Update assertions for editing notes
+
+* 0.4.1
+#+DATE: 2024/08/19
++  Update to emacsql-4.0.0
+
+* 0.4.0
+#+DATE: 2024/08/07
++ Major rewrite on gnosis algorithm.
+  + Add gnosis-score
+  + Add epignosis and agnoia
+  + Add lethe and anagnosis events
+    + Anagnosis events adjust gnosis-score
+      depending on review performance, using epignosis
+      and agnoia
+    + Lethe resets next interval to 0
+  + Refactor calculations of next interval and gnosis-score
++ Add custom variables for tags and decks, configured using emacs
+  lisp.
++ Rewrite gnosis database.
+  + Remove deck specific values.
+  + Use new algorithm variables.
