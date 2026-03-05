@@ -61,6 +61,7 @@ Cloze
 Customization
 
 * Typos | String Comparison::
+* Auto Input Method::
 
 Gnosis Algorithm
 
@@ -347,9 +348,10 @@ File: gnosis.info,  Node: Customization,  Next: Gnosis Algorithm,  Prev: Linking
 * Menu:
 
 * Typos | String Comparison::
+* Auto Input Method::
 
 
-File: gnosis.info,  Node: Typos | String Comparison,  Up: Customization
+File: gnosis.info,  Node: Typos | String Comparison,  Next: Auto Input Method,  Up: Customization
 
 5.1 Typos | String Comparison
 =============================
@@ -368,6 +370,47 @@ difference of at most one character edit.
    To demonstrate, 'example' and 'examples' will be recognized as
 similar, considering that the latter involves just one additional
 character."
+
+
+File: gnosis.info,  Node: Auto Input Method,  Prev: Typos | String Comparison,  Up: Customization
+
+5.2 Auto Input Method
+=====================
+
+When reviewing themata whose answers are in a non-Latin script (e.g.,
+Greek, Cyrillic), Gnosis can automatically activate the appropriate
+Emacs input method before prompting for input.  After the prompt, the
+previous input method is restored.
+
+   This is controlled by ‘gnosis-script-input-method-alist’, an alist
+mapping script symbols (as returned by ‘char-script-table’) to input
+method names.
+
+   The default value maps Greek and Cyrillic scripts:
+
+     (setq gnosis-script-input-method-alist
+           '((greek . "greek")
+             (cyrillic . "cyrillic-translit")))
+
+   To add support for additional scripts, append entries to the alist:
+
+     (setq gnosis-script-input-method-alist
+           '((greek . "greek")
+             (cyrillic . "cyrillic-translit")
+             (hebrew . "hebrew")))
+
+   You can list all available input methods with ‘M-x
+list-input-methods’.  The script symbols correspond to values in Emacs's
+‘char-script-table’ (e.g., ‘greek’, ‘cyrillic’, ‘hebrew’, ‘arabic’,
+‘han’).
+
+   To disable this feature entirely, set the alist to ‘nil’:
+
+     (setq gnosis-script-input-method-alist nil)
+
+   This feature applies to basic and cloze review types (where you type
+the answer) and to monkeytype sessions.  MCQ and mc-cloze types use
+selection, so no input method change is needed.
 
 
 File: gnosis.info,  Node: Gnosis Algorithm,  Next: Import & Export,  Prev: Customization,  Up: Top
@@ -660,32 +703,33 @@ find on the git log.
 
 Tag Table:
 Node: Top201
-Node: Introduction1728
-Node: Getting started Tutorial3029
-Node: Gnosis Dashboard3459
-Node: Linking Themata to Note Topics4461
-Node: Thema Types5509
-Node: Cloze6485
-Node: Default cloze format6876
-Node: Using anki-like syntax7488
-Node: MCQ8579
-Node: Linking gnosis themata to org-gnosis content9784
-Node: Customization10321
-Node: Typos | String Comparison10525
-Node: Gnosis Algorithm11281
-Node: Anagnosis Event11946
-Node: Lethe event12693
-Node: Proto13137
-Node: Import & Export13900
-Node: Exporting a deck14093
-Node: Importing a deck14704
-Node: Editing themata15321
-Node: Sync between devices15718
-Node: Interactions with other software16796
-Node: emacs-no-littering17024
-Node: Contributing17526
-Node: Patches Require Copyright Assignment To The FSF17920
-Node: How to create a patch19878
+Node: Introduction1750
+Node: Getting started Tutorial3051
+Node: Gnosis Dashboard3481
+Node: Linking Themata to Note Topics4483
+Node: Thema Types5531
+Node: Cloze6507
+Node: Default cloze format6898
+Node: Using anki-like syntax7510
+Node: MCQ8601
+Node: Linking gnosis themata to org-gnosis content9806
+Node: Customization10343
+Node: Typos | String Comparison10569
+Node: Auto Input Method11351
+Node: Gnosis Algorithm12848
+Node: Anagnosis Event13513
+Node: Lethe event14260
+Node: Proto14704
+Node: Import & Export15467
+Node: Exporting a deck15660
+Node: Importing a deck16271
+Node: Editing themata16888
+Node: Sync between devices17285
+Node: Interactions with other software18363
+Node: emacs-no-littering18591
+Node: Contributing19093
+Node: Patches Require Copyright Assignment To The FSF19487
+Node: How to create a patch21445
 
 End Tag Table
 
