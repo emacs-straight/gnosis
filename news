@@ -1,4 +1,4 @@
-                                        2026/03/04 2026/02/24 2026/01/26
+                                                   2026/03/16 2026/03/04
 
 
 ⁃ [Homepage]
@@ -13,10 +13,94 @@
 [Changelog] <https://thanosapollo.org/log/gnosis/>
 
 
-1 0.8.0
+1 0.9.0
 ═══════
 
-1.1 New features
+1.1 Breaking changes
+────────────────────
+
+  ⁃ *Dropped emacsql dependency*: gnosis now uses Emacs's built-in
+    `sqlite' module (requires Emacs 29+).  The new `gnosis-sqlite'
+    backend handles all database access.
+  ⁃ *Unified database*: org-gnosis has been merged into gnosis.  A
+    single `gnosis.db' stores both themata and nodes.  Existing
+    org-gnosis data is migrated automatically.
+  ⁃ *Decks removed*: the deck abstraction is gone.  Existing deck names
+    are automatically converted into tags during the v6 migration, so no
+    data is lost.  Export and import are now thema-centric with tag
+    filtering.
+
+
+1.2 New features
+────────────────
+
+  ⁃ *Anki import*: import Anki decks or user collections directly with
+    `gnosis-anki-import'.
+  ⁃ *Tag filtering*: `gnosis-tags-filter-prompt' supports `+tag -tag'
+    syntax for include/exclude filtering.  Used in export and
+    `gnosis-collect-thema-ids'.
+  ⁃ *Day start hour*: `gnosis-algorithm-day-start-hour' (default 3) lets
+    you define when a new review day begins.
+  ⁃ *Tag bulk operations*: rename, regex bulk rename (`R'), merge case
+    duplicates (`C'), bulk delete, and suspend/unsuspend from the
+    dashboard tags view.  Tag renames are merge-safe (handles UNIQUE
+    conflicts when target tag already exists).
+  ⁃ *Elapsed time intervals*: the algorithm uses actual elapsed time for
+    interval calculation.
+  ⁃ *Review transient menu*: `gnosis-review' uses transient instead of
+    completing-read.
+  ⁃ *Template expansion*: `{*}' heading markers in templates are
+    expanded relative to insertion context via
+    `gnosis-org-expand-headings'.
+  ⁃ *Export with tag filtering*: `gnosis-export-themata' supports tag
+    filtering and node export.
+
+
+1.3 Dashboard
+─────────────
+
+  ⁃ Tags view with regex filter (`l'), regex search (`SPC'), and tag
+    counts.
+  ⁃ Bulk tag rename via regex pattern (`R') using a temp-table approach
+    for O(1) SQL statements regardless of batch size.
+  ⁃ Anki import keybinding in the dashboard menu.
+  ⁃ Merge case-duplicate tags (`C'): groups tags by case, keeps the
+    most-used variant as canonical.
+    ⁃ Meant to simplify imports from anki decks hierarchical tag
+      structure
+  ⁃ Entry cache for themata view (avoids re-querying unchanged entries).
+  ⁃ Cache invalidation on tag mutations so the themata view stays fresh.
+
+
+1.4 Performance
+───────────────
+
+  ⁃ *Batch SQL helpers*: `gnosis-sqlite-execute-batch' and
+    `gnosis-sqlite-select-batch' auto-chunk IN clauses to stay within
+    `SQLITE_MAX_VARIABLE_NUMBER'.
+  ⁃ N+1 query patterns eliminated throughout: tag suspend, tag delete,
+    bulk link, export, and dashboard operations.
+  ⁃ Bulk tag rename uses a temp mapping table (4 SQL statements for any
+    number of renames, instead of 2N).
+  ⁃ `SELECT DISTINCT' replaces Elisp deduplication for tag lookups.
+
+
+1.5 Bug fixes
+─────────────
+
+  ⁃ Fix DST bug in `gnosis-algorithm-date'.
+  ⁃ Fix `gnosis-review-topic': flatten select results, fix y-or-n-p
+    logic.
+  ⁃ Fix `gnosis-completing-read' to use `completing-read' for
+    require-match.
+  ⁃ Fix force-sync purge and journal link FK violation.
+  ⁃ Warn on duplicate filename when timestring is nil in node creation.
+
+
+2 0.8.0
+═══════
+
+2.1 New features
 ────────────────
 
   ⁃ Auto input-method detection: gnosis detects the script of the
@@ -30,7 +114,7 @@
   ⁃ Demo deck included in `decks/demo.org'.
 
 
-1.2 Performance
+2.2 Performance
 ───────────────
 
   ⁃ New `gnosis-tl' module replaces `tabulated-list-print' for dashboard
@@ -39,105 +123,8 @@
   ⁃ Batch-fetch review data instead of per-thema queries.
 
 
-1.3 Bug fixes
+2.3 Bug fixes
 ─────────────
 
   ⁃ Fix anagnosis event calculation in the algorithm.
-  ⁃ Fix cloze tag removal for edge cases and mc-cloze type.
-  ⁃ Fix `vc-pull' to run migrations after pull.
-
-
-2 0.7.0
-═══════
-
-2.1 New features
-────────────────
-
-  ⁃ Review topic from dashboard nodes view (`r'), with configurable
-    forward-link and backlink depth (`R' or `C-u r').
-  ⁃ `gnosis-review-topic' accepts separate forward/backlink depth to
-    include themata from related nodes.
-  ⁃ `gnosis-save-hook' runs after saving a thema, called with the thema
-    ID.
-  ⁃ Link integrity detection and repair commands (`gnosis-links-check',
-    `gnosis-links-sync').
-  ⁃ Dashboard maintenance menu for syncing/rebuilding nodes and link
-    health checks.
-  ⁃ Dashboard shows themata with orphaned links.
-  ⁃ View due org-gnosis nodes linked to themata from dashboard.
-  ⁃ Bulk replace string in keimenon with org-gnosis node link.
-  ⁃ Custom `gnosis-center-content-during-review' option.
-  ⁃ Delete action available during review.
-  ⁃ Format org-gnosis links in keimenon during review output.
-  ⁃ Export deck option to include or exclude suspended themata.
-  ⁃ Exported decks include a `#+THEMATA:' header with thema count.
-  ⁃ Importing into an existing deck prompts for confirmation.
-  ⁃ Failed thema imports report the source file line number.
-
-
-2.2 Dashboard
-─────────────
-
-  ⁃ Added nodes dashboard, view org-gnosis nodes information including
-    backlinks and linked themata as well as start a review session.
-  ⁃ Suspend column displays `Yes' `No' instead of `1' `0'.
-  ⁃ Flatten Actions submenu into the home menu.
-  ⁃ Separate Import/Export into its own menu column.
-  ⁃ Four-column layout: Navigate, Actions, Import/Export, Maintenance.
-
-
-2.3 Algorithm
-─────────────
-
-  ⁃ Cap gnosis-synolon at `gnosis-algorithm-synolon-max' (default 3.0),
-    floor at 1.3.
-  ⁃ Add interval fuzz to prevent review clustering.
-  ⁃ Fix lethe event: properly reduce gnosis-plus on consecutive
-    failures.
-
-
-2.4 Performance
-───────────────
-
-  ⁃ Dashboard suspend, delete, and edit update only the affected entry
-    instead of refreshing the entire buffer.
-  ⁃ Dashboard nodes view uses bulk queries for link counts (2 queries
-    instead of 2N).
-  ⁃ Deck export uses 2 bulk queries instead of 2 per thema (N+1
-    eliminated).
-  ⁃ Deck export uses plain text insertion instead of per-thema buffer
-    scans (O(n^2) eliminated).
-  ⁃ Deck import wraps all operations in a single transaction with
-    pre-cached IDs (10K fsyncs reduced to 1).
-  ⁃ Review updates use a single DB query.
-  ⁃ Tag output uses a single DB call.
-  ⁃ Average daily reviews computed with a single DB call.
-
-
-2.5 Bug fixes
-─────────────
-
-  ⁃ Fix `gnosis-monkeytype' hook leak (now buffer-local).
-  ⁃ Fix `vc-pull' to reopen database properly after successful pull.
-  ⁃ Pre-load `emacsql-sqlite-builtin' to fix `cl-generic' dispatch crash
-    on Emacs 29+.
-
-
-2.6 Documentation
-─────────────────
-
-  ⁃ Update Introduction to describe the intended workflow with
-    `org-gnosis' (write notes, create themata, link, review).
-  ⁃ Document the two separate databases (gnosis and org-gnosis).
-  ⁃ Update dashboard section for new menu layout.
-  ⁃ Add Import & Export section with export options and import behavior.
-
-
-3 0.6.0
-═══════
-
-3.1 New features
-────────────────
-
-  ⁃ View links to org-gnosis nodes during review.
   …  …

@@ -6,9 +6,9 @@
 ;; Keywords: extensions
 ;; URL: https://thanosapollo.org/projects/gnosis
 
-;; Version: 0.8.0
+;; Version: 0.9.0
 
-;; Package-Requires: ((emacs "27.2") (emacsql "4.1.0") (compat "29.1.4.2") (transient "0.7.2") (org-gnosis "0.2.0"))
+;; Package-Requires: ((emacs "29.1") (compat "29.1.4.2"))
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -27,31 +27,27 @@
 
 ;; Gnosis is a personal knowledge management and review system that
 ;; integrates a note-taking system with spaced repetition and
-;; self-testing.  It works together with org-gnosis, which provides a
-;; Zettelkasten-style note-taking system where notes (nodes) are org
-;; files indexed in an SQLite database.
+;; self-testing.  It provides Zettelkasten-style linked notes (nodes)
+;; alongside spaced repetition themata, all in a single SQLite database.
 ;;
 ;; The intended workflow is:
 ;;
-;; 1. Write notes on a topic using `org-gnosis-find'.
+;; 1. Write notes on a topic using `gnosis-nodes-find'.
 ;; 2. Create themata (flashcard-like questions) related to the topic
 ;;    using `gnosis-add-thema'.
-;; 3. Link themata to note topics by inserting org-gnosis links in
+;; 3. Link themata to note topics by inserting node links in
 ;;    the keimenon (question text) or parathema (extra context) using
-;;    `org-gnosis-insert'.
+;;    `gnosis-nodes-insert'.
 ;; 4. Review themata with spaced repetition via `gnosis-review', or
 ;;    review all themata linked to a specific topic via
 ;;    `gnosis-review-topic'.
 ;;
-;; Gnosis and org-gnosis maintain separate SQLite databases.  The
-;; gnosis database stores themata, decks, review history, and links
-;; from themata to org-gnosis nodes.  The org-gnosis database stores
-;; nodes, tags, and links between nodes.
+;; Everything lives in one database: themata, review history,
+;; nodes, node links, and thema-to-node links.
 ;;
 ;; The spaced repetition algorithm is highly adjustable, allowing
-;; users to set specific values not just for thema decks but for tags
-;; as well, creating a personalized learning environment for each
-;; topic.
+;; users to set specific values for tags, creating a personalized
+;; learning environment for each topic.
 
 ;;; Code:
 
@@ -59,8 +55,7 @@
 (require 'subr-x)
 
 (require 'vc-git)
-(require 'emacsql-sqlite)
-(require 'emacsql-sqlite-builtin nil t)
+(require 'gnosis-sqlite)
 (require 'transient)
 (require 'animate)
 
@@ -70,7 +65,9 @@
 (require 'gnosis-algorithm)
 (require 'gnosis-monkeytype)
 (require 'gnosis-utils)
-(require 'org-gnosis)
+(require 'gnosis-org)
+(require 'gnosis-nodes)
+(require 'gnosis-journal)
 
 
 (defgroup gnosis nil
@@ -197,7 +194,7 @@ Creates `gnosis-dir' and runs schema initialization on first use."
   (unless gnosis-db
     (unless (file-directory-p gnosis-dir)
       (make-directory gnosis-dir))
-    (setq gnosis-db (emacsql-sqlite-open (expand-file-name "gnosis.db" gnosis-dir)))
+    (setq gnosis-db (gnosis-sqlite-open (expand-file-name "gnosis.db" gnosis-dir)))
     (gnosis-db-init))
   gnosis-db)
 
@@ -209,7 +206,7 @@ Creates `gnosis-dir' and runs schema initialization on first use."
   "Change this to non-nil when running manual tests.")
 
 
-(defconst gnosis-db-version 4
+(defconst gnosis-db-version 6
   "Gnosis database version.")
 
 (defvar gnosis-thema-types
@@ -245,18 +242,19 @@ Creates `gnosis-dir' and runs schema initialization on first use."
 (autoload 'gnosis-monkeytype-start "gnosis-review" nil t)
 (autoload 'gnosis-history-clear "gnosis-review" nil t)
 
+;; Anki import autoload
+(autoload 'gnosis-import-anki "gnosis-anki" nil t)
+
 ;; Export/import autoloads
 (autoload 'gnosis-export--insert-thema "gnosis-export-import")
-(autoload 'gnosis-export-themata "gnosis-export-import")
+(autoload 'gnosis-export--insert-themata "gnosis-export-import")
 (autoload 'gnosis-export-parse-themata "gnosis-export-import")
-(autoload 'gnosis-export-parse--deck-name "gnosis-export-import")
-(autoload 'gnosis-export-deck "gnosis-export-import" nil t)
-(autoload 'gnosis-export-deck-async "gnosis-export-import" nil t)
+(autoload 'gnosis-export-themata "gnosis-export-import" nil t)
+(autoload 'gnosis-export-themata-to-file "gnosis-export-import" nil t)
 (autoload 'gnosis-save-thema "gnosis-export-import")
 (autoload 'gnosis-save "gnosis-export-import" nil t)
-(autoload 'gnosis-save-deck "gnosis-export-import" nil t)
-(autoload 'gnosis-import-deck "gnosis-export-import" nil t)
-(autoload 'gnosis-import-deck-async "gnosis-export-import" nil t)
+(autoload 'gnosis-import-file "gnosis-export-import" nil t)
+(autoload 'gnosis-import-file-async "gnosis-export-import" nil t)
 
 (defvar gnosis-export-separator "\n- ")
 
@@ -265,15 +263,12 @@ Creates `gnosis-dir' and runs schema initialization on first use."
 Each function is called with the saved thema ID (integer).")
 
 (defcustom gnosis-custom-values
-  '((:deck "demo" (:proto (0 1 3) :anagnosis 3 :epignosis 0.5 :agnoia 0.3
-			  :amnesia 0.5 :lethe 3))
-    (:tag "demo" (:proto (1 2) :anagnosis 3 :epignosis 0.5 :agnoia 0.3
+  '((:tag "demo" (:proto (1 2) :anagnosis 3 :epignosis 0.5 :agnoia 0.3
 			 :amnesia 0.45 :lethe 3)))
   "Custom review values for adjusting gnosis algorithm.
 
-Each entry is a list of (SCOPE NAME PARAMETERS) where:
-- SCOPE is :deck or :tag
-- NAME is the deck/tag name string
+Each entry is a list of (:tag NAME PARAMETERS) where:
+- NAME is the tag name string
 - PARAMETERS is a plist with keys:
   :proto (list of integers), :anagnosis (integer),
   :epignosis (number), :agnoia (number),
@@ -301,9 +296,11 @@ for O(1) lookups instead of querying the database per thema.")
 
 Optional argument FLATTEN, when non-nil, flattens the result."
   (let* ((db (gnosis--ensure-db))
-	 (restrictions (or restrictions '(= 1 1)))
-	 (flatten (or flatten nil))
-	 (output (emacsql db `[:select ,value :from ,table :where ,restrictions])))
+	 (cols (gnosis-sqlite--compile-columns value))
+	 (where (gnosis-sqlite--compile-expr (or restrictions '(= 1 1))))
+	 (sql (format "SELECT %s FROM %s WHERE %s"
+		      cols (gnosis-sqlite--ident table) (car where)))
+	 (output (gnosis-sqlite--select-compiled db sql (cdr where))))
     (if flatten (apply #'append output) output)))
 
 (defun gnosis-table-exists-p (table)
@@ -316,11 +313,15 @@ Optional argument FLATTEN, when non-nil, flattens the result."
 (defun gnosis--create-table (table &optional values)
   "Create TABLE for VALUES."
   (unless (gnosis-table-exists-p table)
-    (emacsql (gnosis--ensure-db) `[:create-table ,table ,values])))
+    (let ((sql (format "CREATE TABLE %s (%s)"
+		       (gnosis-sqlite--ident table)
+		       (gnosis-sqlite--compile-schema values))))
+      (gnosis-sqlite-execute (gnosis--ensure-db) sql))))
 
 (defun gnosis--drop-table (table)
   "Drop TABLE from `gnosis-db'."
-  (emacsql (gnosis--ensure-db) `[:drop-table ,table]))
+  (gnosis-sqlite-execute (gnosis--ensure-db)
+			 (format "DROP TABLE %s" (gnosis-sqlite--ident table))))
 
 (defun gnosis-drop-table (table)
   "Drop TABLE from `gnosis-db'."
@@ -329,14 +330,24 @@ Optional argument FLATTEN, when non-nil, flattens the result."
 
 (defun gnosis--insert-into (table values)
   "Insert VALUES to TABLE."
-  (emacsql (gnosis--ensure-db) `[:insert :into ,table :values ,values]))
+  (let* ((compiled (gnosis-sqlite--compile-values values))
+	 (sql (format "INSERT INTO %s VALUES %s"
+		      (gnosis-sqlite--ident table) (car compiled))))
+    (gnosis-sqlite--execute-compiled (gnosis--ensure-db) sql (cdr compiled))))
 
 (defun gnosis-update (table value where)
   "Update records in TABLE with to new VALUE based on the given WHERE condition.
 
 Example:
  (gnosis-update ='themata ='(= keimenon \"NEW VALUE\") ='(= id 12))"
-  (emacsql (gnosis--ensure-db) `[:update ,table :set ,value :where ,where]))
+  (let* ((set-clause (gnosis-sqlite--compile-expr value))
+	 (where-clause (gnosis-sqlite--compile-expr where))
+	 (sql (format "UPDATE %s SET %s WHERE %s"
+		      (gnosis-sqlite--ident table)
+		      (car set-clause)
+		      (car where-clause))))
+    (gnosis-sqlite--execute-compiled (gnosis--ensure-db) sql
+			   (append (cdr set-clause) (cdr where-clause)))))
 
 (defun gnosis-get (value table &optional restrictions)
   "Return caar of VALUE from TABLE, optionally with where RESTRICTIONS."
@@ -345,24 +356,35 @@ Example:
 (defun gnosis--delete (table &optional where)
   "Delete from TABLE, optionally restricted by WHERE clause."
   (if where
-      (emacsql (gnosis--ensure-db) `[:delete :from ,table :where ,where])
-    (emacsql (gnosis--ensure-db) `[:delete :from ,table])))
+      (let ((compiled (gnosis-sqlite--compile-expr where)))
+	(gnosis-sqlite--execute-compiled (gnosis--ensure-db)
+			       (format "DELETE FROM %s WHERE %s"
+				       (gnosis-sqlite--ident table)
+				       (car compiled))
+			       (cdr compiled)))
+    (gnosis-sqlite--execute-compiled (gnosis--ensure-db)
+			   (format "DELETE FROM %s" (gnosis-sqlite--ident table)))))
 
 (defun gnosis-delete-thema (id &optional verification)
   "Delete thema with ID.
 
 When VERIFICATION is non-nil, skip `y-or-n-p' prompt."
   (when (or verification (y-or-n-p "Delete thema?"))
-    (emacsql-with-transaction (gnosis--ensure-db) (gnosis--delete 'themata `(= id ,id)))))
+    (gnosis-delete-themata (list id))))
 
-(defun gnosis-delete-deck (&optional id)
-  "Delete deck with ID."
-  (interactive)
-  (let* ((id (or id (gnosis--get-deck-id)))
-	 (deck-name (gnosis--get-deck-name id)))
-    (when (y-or-n-p (format "Delete deck `%s'? " deck-name))
-      (emacsql-with-transaction (gnosis--ensure-db) (gnosis--delete 'decks `(= id ,id)))
-      (message "Deleted deck `%s'" deck-name))))
+(defun gnosis-delete-themata (ids)
+  "Delete themata with IDS, batched to stay within SQL variable limits."
+  (let ((db (gnosis--ensure-db)))
+    (gnosis-sqlite-with-transaction db
+      (dolist (table '("thema_tag" "thema_links" "review"
+                       "review_log" "extras" "themata"))
+        (gnosis-sqlite-execute-batch db
+          (format "DELETE FROM %s WHERE %s IN (%%s)"
+                  table
+                  (if (string= table "thema_tag") "thema_id"
+                    (if (string= table "thema_links") "source" "id")))
+          ids)))))
+
 
 (defun gnosis-calculate-average-daily-reviews (&optional days)
   "Calculate average reviews over the last DAYS days."
@@ -388,29 +410,18 @@ When VERIFICATION is non-nil, skip `y-or-n-p' prompt."
 (defun gnosis-completing-read (prompt seq &optional require-match)
   "Call `gnosis-completing-read-function' with shuffled SEQ.
 
-PROMPT: Prompt for `gnosis-completing-read-function'
+PROMPT: Prompt for `gnosis-completing-read-function'.
+REQUIRE-MATCH: When non-nil, user must select from SEQ.
 History is disabled."
-  (let ((history-add-new-input nil))
-    (funcall gnosis-completing-read-function prompt
-	     (gnosis-shuffle (copy-sequence seq)) nil require-match)))
+  (let ((history-add-new-input nil)
+	(collection (gnosis-shuffle (copy-sequence seq))))
+    (if require-match
+	(completing-read prompt collection nil t)
+      (funcall gnosis-completing-read-function prompt collection))))
 
 (defun gnosis-insert-separator ()
-  "Insert a dashed line separator.
-
-Width depends on `gnosis-center-content':
-- When non-nil, spans the entire window width.
-- When nil, uses `fill-column' width."
-  (let* ((width (if gnosis-center-content
-                    (window-width)
-                  fill-column))
-         (dash-line (concat (make-string width ?-))))
-    (insert "\n" dash-line "\n")
-    ;; Apply an overlay to hide only the dashes
-    (let ((start (save-excursion (forward-line -1) (point)))
-          (end (point)))
-      (let ((overlay (make-overlay start end)))
-        (overlay-put overlay 'face 'gnosis-face-separator)
-        (overlay-put overlay 'display (make-string width ?\s))))))
+  "Insert a line separator."
+  (insert "\n" (propertize " " 'display '(space :width text) 'face 'gnosis-face-separator)))
 
 (defun gnosis-center-current-line ()
   "Centers text in the current line ignoring leading spaces."
@@ -480,6 +491,7 @@ Respects `gnosis-center-content' buffer-local setting."
   "Return STR fontified as in `org-mode'."
   (with-temp-buffer
     (org-mode)
+    (org-toggle-pretty-entities)
     (insert str)
     (font-lock-ensure)
     (buffer-string)))
@@ -556,91 +568,38 @@ Set SPLIT to t to split all input given."
 	               unless (string-empty-p part)
                        do (push part input))))
 
-;;;###autoload
-(defun gnosis-add-deck (name)
-  "Create deck with NAME."
-  (interactive (list (read-string "Deck Name: ")))
-  (when gnosis-testing
-    (unless (y-or-n-p "You are using a testing environment! Continue?")
-      (error "Aborted")))
-  (if (gnosis-get 'name 'decks `(= name ,name))
-      (error "Deck `%s' already exists" name)
-    (let ((deck-id (gnosis-generate-id 5 t)))
-      (gnosis--insert-into 'decks `([,deck-id ,name]))
-      (message "Created deck '%s'" name))))
 
-(defun gnosis--get-deck-name (&optional id)
-  "Get deck name for ID, or prompt for deck name when ID is nil."
-  (when (and (equal (gnosis-select 'name 'decks) nil)
-	     (y-or-n-p "No decks found, create deck?"))
-    (gnosis-add-deck (read-string "Deck name: ")))
-  (if id
-      (gnosis-get 'name 'decks `(= id ,id))
-    (funcall gnosis-completing-read-function "Deck: " (gnosis-select 'name 'decks))))
+(cl-defun gnosis-toggle-suspend-themata (ids &optional suspend-value verification)
+  "Suspend or unsuspend themata IDS.
 
-(cl-defun gnosis--get-deck-id (&optional (deck (gnosis--get-deck-name)))
-  "Return id for DECK name."
-  (gnosis-get 'id 'decks `(= name ,deck)))
-
-(defun gnosis-get-deck-id (&optional deck)
-  "Return thema id for DECK.
-
-If DECK does not exist, create it."
-  (cl-assert (stringp deck) nil "DECK must be a string.")
-  (let* ((deck (or deck (gnosis--get-deck-name)))
-	 (deck-id (gnosis-select 'id 'decks `(= name ,deck) t)))
-    (if deck-id (car deck-id)
-      (gnosis-add-deck deck)
-      (gnosis-get-deck-id deck))))
-
-(defun gnosis-get-thema-deck-name (id)
-  "Return deck name of thema ID."
-  (let ((deck (gnosis-get 'deck-id 'themata `(= id ,id))))
-    (and deck (gnosis--get-deck-name deck))))
-
-(cl-defun gnosis-toggle-suspend-themata (ids &optional verification)
-  "Toggle Suspend value for themata IDS.
+When SUSPEND-VALUE is nil and IDS has one element, toggle that thema's
+current value.  When SUSPEND-VALUE is 0 or 1, set all IDS to that value
+explicitly (safe for bulk operations).
 
 When VERIFICATION is non-nil, skips `y-or-n-p' prompt."
   (cl-assert (listp ids) nil "IDS value needs to be a list.")
   (let* ((items-num (length ids))
-         (suspended (and (= items-num 1)
-                         (= (gnosis-get 'suspend 'review-log `(= id ,(car ids))) 1)))
+         (suspend-value
+          (or suspend-value
+              (if (= items-num 1)
+                  (if (= (gnosis-get 'suspend 'review-log `(= id ,(car ids))) 1) 0 1)
+                1)))
+         (action (if (= suspend-value 1) "Suspend" "Unsuspend"))
          (verification
           (or verification
-              (cond ((= items-num 1)
-                     (y-or-n-p
-                      (if suspended "Unsuspend thema? " "Suspend thema? ")))
-                    (t (y-or-n-p
-                        (format "Toggle suspend value for %s items? " items-num)))))))
+              (if (= items-num 1)
+                  (y-or-n-p (format "%s thema? " action))
+                (y-or-n-p (format "%s %d themata? " action items-num))))))
     (when verification
-      (emacsql (gnosis--ensure-db)
-               [:update review-log
-                :set (= suspend (- 1 suspend))
-                :where (in id $v1)]
-               (vconcat ids)))))
+      (gnosis-sqlite-execute-batch (gnosis--ensure-db)
+        "UPDATE review_log SET suspend = ? WHERE id IN (%s)"
+        ids
+        (list suspend-value)))))
 
-(cl-defun gnosis-suspend-deck (&optional (deck (gnosis--get-deck-id)))
-  "Suspend all thema(s) with DECK id.
 
-When called with a prefix, unsuspends all themata in deck."
-  (let* ((themata (gnosis-select 'id 'themata `(= deck-id ,deck) t))
-	 (suspend (if current-prefix-arg 0 1))
-	 (confirm
-	  (y-or-n-p
-	   (if (= suspend 0)
-	       "Unsuspend all themata for deck? " "Suspend all themata for deck? "))))
-    (when confirm
-      (emacsql (gnosis--ensure-db) `[:update review-log :set (= suspend ,suspend) :where
-				   (in id ,(vconcat themata))])
-      (if (equal suspend 0)
-	  (message "Unsuspended %s themata" (length themata))
-	(message "Suspended %s themata" (length themata))))))
-
-(defun gnosis-generate-id (&optional length deck-p)
+(defun gnosis-generate-id (&optional length)
   "Generate a unique gnosis ID.
 
-Default to generating a thema id, when DECK-P is t generates a deck id.
 When `gnosis--id-cache' is bound, uses hash table lookup instead of DB query.
 
 LENGTH: length of id, default to a random number between 10-15."
@@ -648,15 +607,32 @@ LENGTH: length of id, default to a random number between 10-15."
          (max-val (expt 10 length))
          (min-val (expt 10 (1- length)))
          (id (+ (random (- max-val min-val)) min-val))
-	 (exists (if (and gnosis--id-cache (not deck-p))
+	 (exists (if gnosis--id-cache
 		     (gethash id gnosis--id-cache)
-		   (member id (if deck-p (gnosis-select 'id 'decks nil t)
-				(gnosis-select 'id 'themata nil t))))))
+		   (member id (gnosis-select 'id 'themata nil t)))))
     (if exists
         (gnosis-generate-id length)
       (when gnosis--id-cache
         (puthash id t gnosis--id-cache))
       id)))
+
+(defun gnosis-generate-ids (n &optional length)
+  "Generate N unique gnosis IDs as a list.
+Uses `gnosis--id-cache' for O(1) collision checking when bound."
+  (let ((ids nil) (count 0))
+    (while (< count n)
+      (let* ((len (or length (+ (random 5) 10)))
+             (max-val (expt 10 len))
+             (min-val (expt 10 (1- len)))
+             (id (+ (random (- max-val min-val)) min-val))
+             (exists (if gnosis--id-cache
+                         (gethash id gnosis--id-cache)
+                       (member id (gnosis-select 'id 'themata nil t)))))
+        (unless exists
+          (when gnosis--id-cache (puthash id t gnosis--id-cache))
+          (push id ids)
+          (cl-incf count))))
+    (nreverse ids)))
 
 (defun gnosis-mcq-answer (id)
   "Choose the correct answer, from mcq choices for question ID."
@@ -756,10 +732,9 @@ previous state on exit."
 
 (defun gnosis-get-tags--unique ()
   "Return a list of unique strings for tags in `gnosis-db'."
-  (cl-loop for tags in (apply 'append
-			      (emacsql (gnosis--ensure-db) [:select :distinct tags :from themata]))
-           nconc tags into all-tags
-           finally return (delete-dups all-tags)))
+  (mapcar #'car
+	  (gnosis-sqlite-select (gnosis--ensure-db)
+	    "SELECT DISTINCT tag FROM thema_tag")))
 
 (defun gnosis-collect-tag-thema-ids (tags &optional ids)
   "Collect thema IDS for TAGS."
@@ -768,48 +743,25 @@ previous state on exit."
     (gnosis-collect-tag-thema-ids (cdr tags)
                                  (append ids (gnosis-get-tag-themata (car tags))))))
 
-(defun gnosis-select-by-tag (input-tags &optional due suspended-p)
-  "Return thema ID's for every thema with INPUT-TAGS.
-
-If DUE, return only due themata.
-If SUSPENDED-P, return suspended themata as well."
-  (cl-assert (listp input-tags) t "Input tags must be a list")
-  (cl-assert (booleanp due) "Due value must be a boolean")
-  (let ((ids (gnosis-collect-tag-thema-ids input-tags)))
-    ;; Filter the collected IDs based on due and suspension status
-    (cl-loop for id in ids
-             when (and (or (not suspended-p) (not (gnosis-suspended-p id)))
-                       (if due (gnosis-review-is-due-p id) t))
-             collect id)))
-
 (defun gnosis-get-tag-themata (tag)
   "Return thema ids for TAG."
-  (let ((themata (gnosis-select 'id 'themata `(like tags ',(format "%%\"%s\"%%" tag)) t)))
-    themata))
+  (gnosis-select 'thema-id 'thema-tag `(= tag ,tag) t))
 
 (defun gnosis-suspended-p (id)
   "Return t if thema with ID is suspended."
   (= (gnosis-get 'suspend 'review-log `(= id ,id)) 1))
 
-(defun gnosis-get-deck-themata (&optional deck-id due)
-  "Return themata for deck, with value of DECK-ID.
-
-If DUE is t, return only due themata."
-  (let ((themata (gnosis-select 'id 'themata `(= deck-id ,(or deck-id (gnosis--get-deck-id)))
-				t)))
-    (if (and due themata)
-	;; Bulk-fetch suspend + next-rev in single query instead of N queries
-	(let* ((review-data (gnosis-select '[id suspend next-rev] 'review-log
-					   `(in id ,(vconcat themata))))
-	       (today (gnosis--date-to-int (gnosis-algorithm-date))))
-	  (cl-loop for row in review-data
-		   for id = (nth 0 row)
-		   for suspend = (nth 1 row)
-		   for next-rev = (nth 2 row)
-		   when (and (= suspend 0)
-			     (<= (gnosis--date-to-int next-rev) today))
-		   collect id))
-      themata)))
+(defun gnosis-filter-by-tags (include-tags exclude-tags)
+  "Return thema IDs matching INCLUDE-TAGS but not EXCLUDE-TAGS.
+When INCLUDE-TAGS is nil, start from all thema IDs."
+  (let ((ids (if include-tags
+		(cl-remove-duplicates (gnosis-collect-tag-thema-ids include-tags))
+	      (gnosis-select 'id 'themata nil t))))
+    (if exclude-tags
+	(let ((excluded (cl-remove-duplicates
+			 (gnosis-collect-tag-thema-ids exclude-tags))))
+	  (cl-set-difference ids excluded))
+      ids)))
 
 (defun gnosis--date-to-int (date)
   "Convert DATE list (year month day) to YYYYMMDD integer for fast comparison."
@@ -821,63 +773,156 @@ Return t if DATE is today or in the past, nil if it's in the future.
 DATE is a list of the form (year month day)."
   (<= (gnosis--date-to-int date) (gnosis--date-to-int (gnosis-algorithm-date))))
 
-(defun gnosis-tags--update (tags)
-  "Update db for TAGS."
-  (emacsql-with-transaction (gnosis--ensure-db)
-    (cl-loop for tag in tags
-	     do (gnosis--insert-into 'tags `[,tag]))))
+(defun gnosis-tags--parse-filter (input)
+  "Parse INPUT list of \"+tag\" / \"-tag\" strings.
+Return (INCLUDE . EXCLUDE) cons of plain tag lists."
+  (let (include exclude)
+    (dolist (entry input)
+      (cond ((string-prefix-p "+" entry)
+	     (push (substring entry 1) include))
+	    ((string-prefix-p "-" entry)
+	     (push (substring entry 1) exclude))))
+    (cons (nreverse include) (nreverse exclude))))
 
-(cl-defun gnosis-tags--prompt (&key (prompt "Tags (seperated by ,): ")
-				    (predicate nil)
-				    (require-match nil)
-				    (initial-input nil))
-  "Prompt to select tags with PROMPT."
-  (gnosis-tags-refresh)
+(defun gnosis-tags-filter-prompt ()
+  "Prompt for tag filters using +include / -exclude notation.
+Return (INCLUDE . EXCLUDE) cons of plain tag lists."
+  (interactive)
   (let* ((tags (gnosis-get-tags--unique))
-	 (input (delete-dups
-		 (completing-read-multiple
-		  prompt tags predicate require-match initial-input))))
-    input))
+	 (candidates (cl-loop for tag in tags
+			      nconc (list (concat "+" tag)
+					  (concat "-" tag))))
+	 (input (completing-read-multiple
+		 "Filter tags (+include -exclude): "
+		 candidates nil nil)))
+    (gnosis-tags--parse-filter input)))
 
 (defun gnosis-tags-prompt ()
-  "Tag prompt for adding themata.
-
-If you only require a tag prompt, refer to `gnosis-tags--prompt'."
+  "Tag prompt for adding themata."
   (interactive)
   (unless (derived-mode-p 'org-mode)
     (error "This function is meant to be used in an org-mode buffer"))
   (save-excursion
-    (let ((input (gnosis-tags--prompt))
+    (let ((input (delete-dups
+		  (completing-read-multiple
+		   "Tags (separated by ,): " (gnosis-get-tags--unique))))
 	  (current-tags (org-get-tags)))
       (outline-up-heading 99)
       (when input
-	(gnosis-tags--update input)
 	(setf gnosis-previous-thema-tags input)
         (org-set-tags (append input current-tags))))))
 
-(defun gnosis-tags-refresh ()
-  "Refresh tags table from current themata tags."
-  (let ((tags (gnosis-get-tags--unique)))
-    (emacsql-with-transaction (gnosis--ensure-db)
-      (gnosis--delete 'tags)
-      (cl-loop for tag in tags
-	       do (gnosis--insert-into 'tags `[,tag])))))
-
 (defun gnosis-tag-rename (tag &optional new-tag)
-  "Rename TAG to NEW-TAG.
+  "Rename TAG to NEW-TAG, merging if NEW-TAG already exists.
 
 Replace dashes (-) to underscores (_) for NEW-TAG, as org currently
-does not accept heading tags with dashes."
+does not accept heading tags with dashes.
+When a thema already has NEW-TAG, the duplicate OLD row is removed."
   (let ((new-tag (or new-tag
 		     (replace-regexp-in-string
-		      "-" "_" (read-string "New tag name: ")))))
-    (cl-loop for thema in (gnosis-get-tag-themata tag)
-	     do (let* ((tags (car (gnosis-select '[tags] 'themata `(= id ,thema) t)))
-		       (new-tags (cl-substitute new-tag tag tags :test #'string-equal)))
-		  (gnosis-update 'themata `(= tags ',new-tags) `(= id ,thema))))
-    ;; Update tags in database
-    (gnosis-tags-refresh)
+		      "-" "_" (read-string "New tag name: "))))
+	(db (gnosis--ensure-db)))
+    (when (string-empty-p new-tag)
+      (user-error "Tag name cannot be empty"))
+    (when (string= tag new-tag)
+      (user-error "New tag name is the same as the old one"))
+    (gnosis-sqlite-with-transaction db
+      ;; Remove rows where the thema already has new-tag (avoid UNIQUE conflict)
+      (gnosis-sqlite-execute db
+	"DELETE FROM thema_tag WHERE tag = ? AND thema_id IN
+         (SELECT thema_id FROM thema_tag WHERE tag = ?)"
+	(list tag new-tag))
+      ;; Rename remaining rows
+      (gnosis-sqlite-execute db
+	"UPDATE thema_tag SET tag = ? WHERE tag = ?" (list new-tag tag)))
     (message "Renamed tag '%s' to '%s'" tag new-tag)))
+
+(defun gnosis--tag-rename-batch (pairs)
+  "Rename tags per PAIRS, an alist of (OLD . NEW).
+Pairs where NEW is empty delete those tag rows instead of renaming.
+Uses a temp mapping table so the entire rename is O(1) SQL statements."
+  (let* ((delete-tags (mapcar #'car (cl-remove-if-not
+				     (lambda (p) (string-empty-p (cdr p)))
+				     pairs)))
+	 (rename-pairs (cl-remove-if (lambda (p) (string-empty-p (cdr p)))
+				     pairs))
+	 (db (gnosis--ensure-db))
+	 (max-vars (gnosis-sqlite--max-variable-number db)))
+    (gnosis-sqlite-with-transaction db
+      ;; Delete tags that rename to empty string
+      (when delete-tags
+	(gnosis-sqlite-execute-batch db
+	  "DELETE FROM thema_tag WHERE tag IN (%s)" delete-tags))
+      (when rename-pairs
+	(gnosis-sqlite-execute db
+	  "CREATE TEMP TABLE _tag_map (old_tag TEXT, new_tag TEXT)")
+	;; Bulk-insert pairs, chunked to stay within variable limits
+	(let ((offset 0)
+	      (total (length rename-pairs)))
+	  (while (< offset total)
+	    (let* ((batch-size (/ max-vars 2))
+		   (end (min (+ offset batch-size) total))
+		   (chunk (cl-subseq rename-pairs offset end))
+		   (placeholders (mapconcat (lambda (_) "(?, ?)") chunk ", "))
+		   (params (cl-loop for (old . new) in chunk
+				    append (list old new))))
+	      (gnosis-sqlite-execute db
+		(format "INSERT INTO _tag_map VALUES %s" placeholders)
+		params)
+	      (setq offset end))))
+      ;; 1) Delete rows where thema already has the target tag
+      (gnosis-sqlite-execute db
+	"DELETE FROM thema_tag WHERE rowid IN (
+           SELECT tt.rowid FROM thema_tag tt
+           JOIN _tag_map m ON tt.tag = m.old_tag
+           WHERE EXISTS (SELECT 1 FROM thema_tag t2
+                         WHERE t2.thema_id = tt.thema_id
+                           AND t2.tag = m.new_tag))")
+      ;; 2) Delete intra-rename duplicates: multiple old tags -> same new tag
+      ;;    for the same thema.  Keep the row with the smallest rowid.
+      (gnosis-sqlite-execute db
+	"DELETE FROM thema_tag WHERE rowid IN (
+           SELECT tt.rowid FROM thema_tag tt
+           JOIN _tag_map m ON tt.tag = m.old_tag
+           WHERE EXISTS (SELECT 1 FROM thema_tag tt2
+                         JOIN _tag_map m2 ON tt2.tag = m2.old_tag
+                         WHERE tt2.thema_id = tt.thema_id
+                           AND m2.new_tag = m.new_tag
+                           AND tt2.rowid < tt.rowid))")
+      ;; 3) Rename remaining rows
+      (gnosis-sqlite-execute db
+	"UPDATE thema_tag SET tag = (
+           SELECT m.new_tag FROM _tag_map m WHERE m.old_tag = thema_tag.tag)
+         WHERE tag IN (SELECT old_tag FROM _tag_map)")
+	(gnosis-sqlite-execute db "DROP TABLE _tag_map")))))
+
+(defun gnosis-modify-thema-tags (ids add-tags remove-tags)
+  "Modify tags for thema IDS.  Add ADD-TAGS and remove REMOVE-TAGS.
+Batched to stay within SQL variable limits."
+  (let ((db (gnosis--ensure-db)))
+    (gnosis-sqlite-with-transaction db
+      (dolist (tag remove-tags)
+        (gnosis-sqlite-execute-batch db
+          "DELETE FROM thema_tag WHERE tag = ? AND thema_id IN (%s)"
+          ids
+          (list tag)))
+      (dolist (tag add-tags)
+        (let* ((max-vars (gnosis-sqlite--max-variable-number db))
+               (batch-size (/ max-vars 2))
+               (encoded-tag (prin1-to-string tag))
+               (offset 0)
+               (total (length ids)))
+          (while (< offset total)
+            (let* ((end (min (+ offset batch-size) total))
+                   (chunk (cl-subseq ids offset end))
+                   (placeholders (mapconcat (lambda (_) "(?, ?)") chunk ", "))
+                   (params (cl-loop for id in chunk
+                                    append (list id encoded-tag))))
+              (sqlite-execute db
+                (format "INSERT OR IGNORE INTO thema_tag (thema_id, tag) VALUES %s"
+                        placeholders)
+                params)
+              (setq offset end))))))))
 
 ;; Links
 (defun gnosis-extract-id-links (input &optional start)
@@ -890,38 +935,33 @@ START is the search starting position, used internally for recursion."
               (gnosis-extract-id-links input (match-end 0)))
       nil)))
 
-;; TODO: Rewrite this! Tags should be an input of strings,
-;; interactive handling should be done by "helper" funcs
-(cl-defun gnosis-collect-thema-ids (&key (tags nil) (due nil) (deck nil) (query nil))
-  "Return list of thema ids based on TAGS, DUE, DECKS, QUERY.
+(cl-defun gnosis-collect-thema-ids (&key (tags nil) (due nil) (query nil))
+  "Return list of thema ids based on TAGS, DUE, QUERY.
 
 TAGS: boolean value, t to specify tags.
 DUE: boolean value, t to specify due themata.
-DECK: Integer, specify deck id.
 QUERY: String value."
   (cl-assert (and (booleanp due) (booleanp tags)
-		  (or (numberp deck) (null deck))
 		  (or (stringp query) (null query)))
 	     nil "Incorrect value passed to `gnosis-collect-thema-ids'")
-  (cond ((and (null tags) (null due) (null deck) (null query))
+  (cond ((and (null tags) (null due) (null query))
 	 (gnosis-select 'id 'themata nil t))
 	;; All due themata
-	((and (null tags) due (null deck))
+	((and (null tags) due)
 	 (gnosis-review-get-due-themata))
 	;; All themata for tags
-	((and tags (null due) (null deck))
-	 (gnosis-select-by-tag (gnosis-tags--prompt :require-match t)))
+	((and tags (null due))
+	 (let ((filter (gnosis-tags-filter-prompt)))
+	   (gnosis-filter-by-tags (car filter) (cdr filter))))
 	;; All due themata for tags
-	((and tags due (null deck))
-	 (gnosis-select-by-tag (gnosis-tags--prompt :require-match t) t))
-	;; All themata for deck
-	((and (null tags) (null due) deck)
-	 (gnosis-get-deck-themata deck nil))
-	;; All due themata for deck
-	((and (null tags) deck due)
-	 (gnosis-get-deck-themata deck t))
+	((and tags due)
+	 (let* ((filter (gnosis-tags-filter-prompt))
+		(ids (gnosis-filter-by-tags (car filter) (cdr filter))))
+	   (cl-loop for id in ids
+		    when (gnosis-review-is-due-p id)
+		    collect id)))
 	;; Query
-	((and (null tags) (null due) (null deck) query)
+	(query
 	 (gnosis-search-thema query))))
 
 
@@ -936,12 +976,11 @@ When THEMA-IDS is non-nil, restrict to that subset."
                  t))
 
 
-(defun gnosis-add-thema-fields (deck-id type keimenon hypothesis answer
+(defun gnosis-add-thema-fields (type keimenon hypothesis answer
 				       parathema tags suspend links
 				       &optional review-image gnosis-id)
   "Insert fields for new thema.
 
-DECK-ID: Deck ID for new thema.
 TYPE: Thema type e.g \"mcq\"
 KEIMENON: Thema's keimenon
 HYPOTHESIS: Thema hypothesis, e.g choices for mcq for OR hints for
@@ -952,7 +991,6 @@ PARATHEMA: Parathema information to display after the answer
 TAGS: Tags to organize themata
 SUSPEND: Integer value of 1 or 0, where 1 suspends the card.
 LINKS: List of id links."
-  (cl-assert (integerp deck-id) nil "Deck ID must be an integer")
   (cl-assert (stringp type) nil "Type must be a string")
   (cl-assert (stringp keimenon) nil "Keimenon must be a string")
   (cl-assert (listp hypothesis) nil "Hypothesis value must be a list")
@@ -962,10 +1000,9 @@ LINKS: List of id links."
   (cl-assert (listp links) nil "Links must be a list")
   (let* ((gnosis-id (or gnosis-id (gnosis-generate-id)))
 	 (review-image (or review-image "")))
-    (emacsql-with-transaction (gnosis--ensure-db)
-      ;; Refer to `gnosis-db-schema-SCHEMA' e.g `gnosis-db-schema-review-log'
+    (gnosis-sqlite-with-transaction (gnosis--ensure-db)
       (gnosis--insert-into 'themata `([,gnosis-id ,(downcase type) ,keimenon ,hypothesis
-					      ,answer ,tags ,deck-id]))
+					      ,answer]))
       (gnosis--insert-into 'review  `([,gnosis-id ,gnosis-algorithm-gnosis-value
 						,gnosis-algorithm-amnesia-value]))
       (gnosis--insert-into 'review-log `([,gnosis-id ,(gnosis-algorithm-date)
@@ -973,35 +1010,39 @@ LINKS: List of id links."
 						   ,suspend 0]))
       (gnosis--insert-into 'extras `([,gnosis-id ,parathema ,review-image]))
       (cl-loop for link in links
-	       do (gnosis--insert-into 'links `([,gnosis-id ,link]))))))
+	       do (gnosis--insert-into 'thema-links `([,gnosis-id ,link])))
+      (cl-loop for tag in tags
+	       do (gnosis--insert-into 'thema-tag `([,gnosis-id ,tag]))))))
 
 (defun gnosis-update-thema (id keimenon hypothesis answer parathema tags links
-			      &optional deck-id type)
+			      &optional type)
   "Update thema entry for ID.
 
 If gnosis ID does not exist, create it anew.
 When `gnosis--id-cache' is bound, uses hash table for existence check."
   (let* ((id (if (stringp id) (string-to-number id) id))
-	 (current (car (gnosis-select '[type deck-id] 'themata `(= id ,id))))
-	 (current-type (nth 0 current))
-	 (current-deck (nth 1 current)))
+	 (current-type (gnosis-get 'type 'themata `(= id ,id))))
     (if (if gnosis--id-cache
 	    (gethash id gnosis--id-cache)
 	  (member id (gnosis-select 'id 'themata nil t)))
-	(emacsql-with-transaction (gnosis--ensure-db)
+	(gnosis-sqlite-with-transaction (gnosis--ensure-db)
 	  ;; Single multi-column UPDATE for themata
-	  (emacsql (gnosis--ensure-db)
-	    "UPDATE themata SET keimenon = $s1, hypothesis = $s2, answer = $s3, tags = $s4, type = $s5, deck_id = $s6 WHERE id = $s7"
-	    keimenon hypothesis answer tags
-	    (or type current-type) (or deck-id current-deck) id)
+	  (gnosis-sqlite-execute (gnosis--ensure-db)
+	    "UPDATE themata SET keimenon = ?, hypothesis = ?, answer = ?, type = ? WHERE id = ?"
+	    (list keimenon hypothesis answer
+		  (or type current-type) id))
 	  ;; Single UPDATE for extras
 	  (gnosis-update 'extras `(= parathema ,parathema) `(= id ,id))
 	  ;; Re-sync links
-	  (gnosis--delete 'links `(= source ,id))
+	  (gnosis--delete 'thema-links `(= source ,id))
 	  (cl-loop for link in links
-		   do (gnosis--insert-into 'links `([,id ,link]))))
+		   do (gnosis--insert-into 'thema-links `([,id ,link])))
+	  ;; Re-sync tags
+	  (gnosis--delete 'thema-tag `(= thema-id ,id))
+	  (cl-loop for tag in tags
+		   do (gnosis--insert-into 'thema-tag `([,id ,tag]))))
       (message "Gnosis with id: %d does not exist, creating anew." id)
-      (gnosis-add-thema-fields deck-id type keimenon hypothesis answer parathema tags
+      (gnosis-add-thema-fields type keimenon hypothesis answer parathema tags
 			      0 links nil id))))
 
 ;;;;;;;;;;;;;;;;;;;;;; THEMA HELPERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -1013,41 +1054,40 @@ When `gnosis--id-cache' is bound, uses hash table for existence check."
 ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(defun gnosis-add-thema--assert-common (deck-id keimenon tags suspend links)
+(defun gnosis-add-thema--assert-common (keimenon tags suspend links)
   "Assert common fields shared by all thema types.
-DECK-ID, KEIMENON, TAGS, SUSPEND, and LINKS are validated."
-  (cl-assert (integerp deck-id) nil "Deck-id value must be an integer.")
+KEIMENON, TAGS, SUSPEND, and LINKS are validated."
   (cl-assert (stringp keimenon) nil "Keimenon must be a string.")
   (cl-assert (and (listp tags) (cl-every #'stringp tags)) nil "Tags must be a list of strings.")
   (cl-assert (memq suspend '(0 1)) nil "Suspend value must be 0 or 1.")
   (cl-assert (and (listp links) (cl-every #'stringp links)) nil "Links must be a list of strings."))
 
-(defun gnosis-add-thema--dispatch (id deck-id type keimenon hypothesis
+(defun gnosis-add-thema--dispatch (id type keimenon hypothesis
 				      answer parathema tags suspend links)
   "Dispatch thema creation or update for ID.
 When ID is \"NEW\", create via `gnosis-add-thema-fields'.
 Otherwise, update via `gnosis-update-thema'."
   (if (equal id "NEW")
-      (gnosis-add-thema-fields deck-id type keimenon (or hypothesis (list ""))
+      (gnosis-add-thema-fields type keimenon (or hypothesis (list ""))
 			       answer parathema tags suspend links)
-    (gnosis-update-thema id keimenon hypothesis answer parathema tags links deck-id type)))
+    (gnosis-update-thema id keimenon hypothesis answer parathema tags links type)))
 
-(defun gnosis-add-thema--basic (id deck-id type keimenon hypothesis
+(defun gnosis-add-thema--basic (id type keimenon hypothesis
 				   answer parathema tags suspend links)
   "Add or update a basic thema."
-  (gnosis-add-thema--assert-common deck-id keimenon tags suspend links)
+  (gnosis-add-thema--assert-common keimenon tags suspend links)
   (cl-assert (or (null hypothesis)
 		 (and (listp hypothesis) (= (length hypothesis) 1)))
 	     nil "Hypothesis must be a list of a single item or nil.")
   (cl-assert (and (listp answer) (= (length answer) 1))
 	     nil "Answer must be a list of a single item.")
-  (gnosis-add-thema--dispatch id deck-id type keimenon hypothesis
+  (gnosis-add-thema--dispatch id type keimenon hypothesis
 			      answer parathema tags suspend links))
 
-(defun gnosis-add-thema--double (id deck-id type keimenon hypothesis
+(defun gnosis-add-thema--double (id type keimenon hypothesis
 				    answer parathema tags suspend links)
   "Add a double thema (two basic themata with reversed Q/A)."
-  (gnosis-add-thema--assert-common deck-id keimenon tags suspend links)
+  (gnosis-add-thema--assert-common keimenon tags suspend links)
   (cl-assert (listp hypothesis) nil "Hypothesis must be a list.")
   (cl-assert (and (listp answer) (= (length answer) 1))
 	     nil "Answer must be a list of a single item.")
@@ -1055,29 +1095,29 @@ Otherwise, update via `gnosis-update-thema'."
 	(hypothesis (or hypothesis (list ""))))
     (if (equal id "NEW")
 	(progn
-	  (gnosis-add-thema-fields deck-id type keimenon hypothesis
+	  (gnosis-add-thema-fields type keimenon hypothesis
 				   answer parathema tags suspend links)
-	  (gnosis-add-thema-fields deck-id type (car answer) hypothesis
+	  (gnosis-add-thema-fields type (car answer) hypothesis
 				   (list keimenon) parathema tags suspend links))
-      (gnosis-update-thema id keimenon hypothesis answer parathema tags links deck-id type))))
+      (gnosis-update-thema id keimenon hypothesis answer parathema tags links type))))
 
-(defun gnosis-add-thema--mcq (id deck-id type keimenon hypothesis
+(defun gnosis-add-thema--mcq (id type keimenon hypothesis
 				answer parathema tags suspend links)
   "Add or update an MCQ thema."
-  (gnosis-add-thema--assert-common deck-id keimenon tags suspend links)
+  (gnosis-add-thema--assert-common keimenon tags suspend links)
   (cl-assert (string= type "mcq") nil "TYPE must be \"mcq\".")
   (cl-assert (and (listp hypothesis) (> (length hypothesis) 1))
 	     nil "Hypothesis must be a list of more than 1 item.")
   (cl-assert (and (listp answer) (= (length answer) 1)
 		  (member (car answer) hypothesis))
 	     nil "Answer must be a single item, member of hypothesis.")
-  (gnosis-add-thema--dispatch id deck-id type keimenon hypothesis
+  (gnosis-add-thema--dispatch id type keimenon hypothesis
 			      answer parathema tags suspend links))
 
-(defun gnosis-add-thema--cloze (id deck-id type keimenon hypothesis
+(defun gnosis-add-thema--cloze (id type keimenon hypothesis
 				  answer parathema tags suspend links)
   "Add or update a cloze thema."
-  (gnosis-add-thema--assert-common deck-id keimenon tags suspend links)
+  (gnosis-add-thema--assert-common keimenon tags suspend links)
   (cl-assert (string= type "cloze") nil "TYPE must be \"cloze\".")
   (cl-assert (or (null hypothesis) (>= (length answer) (length hypothesis)))
 	     nil "Hypothesis length must not exceed answer length.")
@@ -1092,16 +1132,16 @@ Otherwise, update via `gnosis-update-thema'."
 		   (hints (gnosis-cloze-extract-hints contents)))
 	      (cl-loop for cloze in clozes
 		       for hint in hints
-		       do (gnosis-add-thema-fields deck-id type keimenon-clean hint cloze
+		       do (gnosis-add-thema-fields type keimenon-clean hint cloze
 						   parathema tags suspend links)))
-	  (gnosis-add-thema-fields deck-id type keimenon-clean (or hypothesis (list ""))
+	  (gnosis-add-thema-fields type keimenon-clean (or hypothesis (list ""))
 				   answer parathema tags suspend links))
-      (gnosis-update-thema id keimenon-clean hypothesis answer parathema tags links deck-id type))))
+      (gnosis-update-thema id keimenon-clean hypothesis answer parathema tags links type))))
 
-(defun gnosis-add-thema--mc-cloze (id deck-id type keimenon hypothesis
+(defun gnosis-add-thema--mc-cloze (id type keimenon hypothesis
 				  answer parathema tags suspend links)
   "Add or update an mc-cloze thema."
-  (gnosis-add-thema--assert-common deck-id keimenon tags suspend links)
+  (gnosis-add-thema--assert-common keimenon tags suspend links)
   (cl-assert (string= type "mc-cloze") nil "TYPE must be \"mc-cloze\".")
   (cl-assert (and (listp hypothesis) (> (length hypothesis) (length answer)))
 	     nil "Hypothesis must be a list, longer than answer.")
@@ -1111,22 +1151,20 @@ Otherwise, update via `gnosis-update-thema'."
   (cl-assert (gnosis-cloze-check keimenon answer) nil
 	     "Cloze answers are not part of keimenon.")
   (let ((keimenon-clean (gnosis-cloze-remove-tags keimenon)))
-    (gnosis-add-thema--dispatch id deck-id type keimenon-clean hypothesis
+    (gnosis-add-thema--dispatch id type keimenon-clean hypothesis
 				answer parathema tags suspend links)))
 
 ;;;###autoload
-(defun gnosis-add-thema (deck type &optional keimenon hypothesis
+(defun gnosis-add-thema (type &optional keimenon hypothesis
 			      answer parathema tags example)
-  "Add thema with TYPE in DECK."
+  "Add thema with TYPE."
   (interactive (list
-		(gnosis--get-deck-name)
 		(downcase (completing-read "Select type: " gnosis-thema-types))))
   (window-configuration-to-register :gnosis-edit)
   (pop-to-buffer "*Gnosis NEW*")
   (with-current-buffer "*Gnosis NEW*"
     (let ((inhibit-read-only 1))
       (erase-buffer))
-    (insert "#+DECK: " deck)
     (gnosis-edit-mode)
     (gnosis-export--insert-thema "NEW" type keimenon hypothesis
 				answer parathema tags example))
@@ -1137,13 +1175,10 @@ Otherwise, update via `gnosis-update-thema'."
   "Edit thema with ID."
   (window-configuration-to-register :gnosis-edit)
   (with-current-buffer (pop-to-buffer "*Gnosis Edit*")
-    (let ((inhibit-read-only 1)
-	  (deck-name (gnosis--get-deck-name
-		      (gnosis-get 'deck-id 'themata `(= id ,id)))))
-      (erase-buffer)
-      (insert "#+DECK: " deck-name))
+    (let ((inhibit-read-only 1))
+      (erase-buffer))
     (gnosis-edit-mode)
-    (gnosis-export-themata (list id))
+    (gnosis-export--insert-themata (list id))
     (search-backward "keimenon")
     (forward-line)))
 
@@ -1160,7 +1195,7 @@ Otherwise, update via `gnosis-update-thema'."
   :doc "gnosis org mode map"
   "C-c C-c" #'gnosis-save
   "C-c C-q" #'gnosis-tags-prompt
-  "C-c C-o" #'org-gnosis-goto-id
+  "C-c C-o" #'gnosis-nodes-goto-id
   "C-c C-k" #'gnosis-edit-quit)
 
 (define-derived-mode gnosis-edit-mode org-mode "Gnosis Org"
@@ -1178,11 +1213,11 @@ Otherwise, update via `gnosis-update-thema'."
     (error "GNOSIS-CUSTOM-VALUES should be a list of entries"))
   (dolist (entry new-value)
     (unless (and (listp entry) (= (length entry) 3)
-                 (memq (nth 0 entry) '(:deck :tag))
+                 (eq (nth 0 entry) :tag)
                  (stringp (nth 1 entry))
                  (listp (nth 2 entry))) ; Ensure the third element is a plist
       (error
-       "Each entry should a have :deck or :tag keyword, a string, and a plist of custom values"))
+       "Each entry should have a :tag keyword, a string, and a plist of custom values"))
     (let ((proto (plist-get (nth 2 entry) :proto))
           (anagnosis (plist-get (nth 2 entry) :anagnosis))
           (epignosis (plist-get (nth 2 entry) :epignosis))
@@ -1231,8 +1266,8 @@ WHERE is the buffer or object where the change happens."
   "Return SEARCH-VALUE for KEY from VALUES.
 
 VALUES: Defaults to `gnosis-custom-values'."
-  (cl-assert (or (eq key :deck) (eq key :tag)) nil "Key value must be either :tag or :deck")
-  (cl-assert (stringp search-value) nil "Search-value must be the name of tag or deck as a string.")
+  (cl-assert (eq key :tag) nil "Key value must be :tag")
+  (cl-assert (stringp search-value) nil "Search-value must be the name of a tag as a string.")
   (let ((results)
 	(values (or values gnosis-custom-values)))
     (dolist (rule values)
@@ -1242,14 +1277,10 @@ VALUES: Defaults to `gnosis-custom-values'."
     (gnosis-get-custom-values--validate results gnosis-custom--valid-values)
     results))
 
-(defun gnosis-get-custom-deck-value (deck value &optional values)
-  "Return custom VALUE for thema DECK."
-  (plist-get (gnosis-get-custom-values :deck deck values) value))
-
 (defun gnosis-get-custom-tag-values (id keyword &optional custom-tags custom-values)
   "Return KEYWORD values for thema ID."
   (cl-assert (keywordp keyword) nil "keyword must be a keyword!")
-  (let ((tags (if id (gnosis-get 'tags 'themata `(= id ,id)) custom-tags)))
+  (let ((tags (if id (gnosis-select 'tag 'thema-tag `(= thema-id ,id) t) custom-tags)))
     (cl-loop for tag in tags
 	     ;; Only collect non-nil values
 	     when (plist-get (gnosis-get-custom-values :tag tag custom-values) keyword)
@@ -1264,22 +1295,15 @@ Returns nil when no tags define KEYWORD."
   (let ((vals (gnosis-get-custom-tag-values id keyword custom-tags custom-values)))
     (and vals (apply aggregator vals))))
 
-(defun gnosis--get-deck-value (id keyword default-var &optional custom-deck custom-values)
-  "Return deck value for thema ID and KEYWORD, falling back to DEFAULT-VAR."
-  (let ((deck (or custom-deck (gnosis-get-thema-deck-name id))))
-    (or (gnosis-get-custom-deck-value deck keyword custom-values)
-        default-var)))
-
 (defun gnosis-get-thema-custom-value (id keyword aggregator default-var
-					 &optional validate-p custom-deck custom-tags custom-values)
+					 &optional validate-p custom-tags custom-values)
   "Return the custom algorithm value for thema ID and KEYWORD.
 
-Looks up tag values (aggregated with AGGREGATOR) and deck value
-\(falling back to DEFAULT-VAR).  Tags take priority over deck.
+Looks up tag values (aggregated with AGGREGATOR), falling back to
+DEFAULT-VAR.
 When VALIDATE-P is non-nil, signals error if value >= 1."
   (let* ((tag-val (gnosis--get-tag-value id keyword aggregator custom-tags custom-values))
-         (deck-val (gnosis--get-deck-value id keyword default-var custom-deck custom-values))
-         (val (or tag-val deck-val)))
+         (val (or tag-val default-var)))
     (when (and validate-p (>= val 1))
       (error "%s value must be lower than 1" keyword))
     val))
@@ -1306,44 +1330,22 @@ When VALIDATE-P is non-nil, signals error if value >= 1."
   "Return tag lethe for thema ID."
   (gnosis--get-tag-value id :lethe #'min custom-tags custom-values))
 
-;; Named wrappers -- deck variants (used in tests)
+;; Named wrappers -- merged (tag overrides default)
 
-(defun gnosis-get-thema-deck-amnesia (id &optional custom-deck custom-values)
-  "Return deck amnesia for thema ID."
-  (gnosis--get-deck-value id :amnesia gnosis-algorithm-amnesia-value custom-deck custom-values))
-
-(defun gnosis-get-thema-deck-epignosis (id &optional custom-deck custom-values)
-  "Return deck epignosis for thema ID."
-  (gnosis--get-deck-value id :epignosis gnosis-algorithm-epignosis-value custom-deck custom-values))
-
-(defun gnosis-get-thema-deck-agnoia (id &optional custom-deck custom-values)
-  "Return deck agnoia for thema ID."
-  (gnosis--get-deck-value id :agnoia gnosis-algorithm-agnoia-value custom-deck custom-values))
-
-(defun gnosis-get-thema-deck-anagnosis (id &optional custom-deck custom-values)
-  "Return deck anagnosis for thema ID."
-  (gnosis--get-deck-value id :anagnosis gnosis-algorithm-anagnosis-value custom-deck custom-values))
-
-(defun gnosis-get-thema-deck-lethe (id &optional custom-deck custom-values)
-  "Return deck lethe for thema ID."
-  (gnosis--get-deck-value id :lethe gnosis-algorithm-lethe-value custom-deck custom-values))
-
-;; Named wrappers -- merged (tag overrides deck)
-
-(defun gnosis-get-thema-amnesia (id &optional custom-deck custom-tags custom-values)
+(defun gnosis-get-thema-amnesia (id &optional custom-tags custom-values)
   "Return amnesia value for thema ID."
   (gnosis-get-thema-custom-value id :amnesia #'max gnosis-algorithm-amnesia-value
-				 t custom-deck custom-tags custom-values))
+				 t custom-tags custom-values))
 
-(defun gnosis-get-thema-epignosis (id &optional custom-deck custom-tags custom-values)
+(defun gnosis-get-thema-epignosis (id &optional custom-tags custom-values)
   "Return epignosis value for thema ID."
   (gnosis-get-thema-custom-value id :epignosis #'max gnosis-algorithm-epignosis-value
-				 t custom-deck custom-tags custom-values))
+				 t custom-tags custom-values))
 
-(defun gnosis-get-thema-agnoia (id &optional custom-deck custom-tags custom-values)
+(defun gnosis-get-thema-agnoia (id &optional custom-tags custom-values)
   "Return agnoia value for thema ID."
   (gnosis-get-thema-custom-value id :agnoia #'max gnosis-algorithm-agnoia-value
-				 t custom-deck custom-tags custom-values))
+				 t custom-tags custom-values))
 
 (defun gnosis-proto-max-values (proto-values)
   "Return max values from PROTO-VALUES."
@@ -1355,27 +1357,24 @@ When VALIDATE-P is non-nil, signals error if value >= 1."
                                  proto-values)))
       (apply #'cl-mapcar #'max padded-lists))))
 
-(defun gnosis-get-thema-proto (id &optional custom-tags custom-deck custom-values)
-  "Return tag proto values for thema ID.
+(defun gnosis-get-thema-proto (id &optional custom-tags custom-values)
+  "Return proto values for thema ID.
 
 CUSTOM-VALUES: Custom values to be used instead.
-CUSTOM-TAGS: Custom tags to be used instead.
-CUSTOM-DECK: Custom deck to be used instead."
-  (let* ((deck (or custom-deck (gnosis-get-thema-deck-name id)))
-	 (tags-proto (gnosis-get-custom-tag-values id :proto custom-tags custom-values))
-	 (decks-proto (gnosis-get-custom-deck-value deck :proto custom-values)))
+CUSTOM-TAGS: Custom tags to be used instead."
+  (let ((tags-proto (gnosis-get-custom-tag-values id :proto custom-tags custom-values)))
     (if tags-proto (gnosis-proto-max-values tags-proto)
-      (gnosis-proto-max-values (or decks-proto gnosis-algorithm-proto)))))
+      gnosis-algorithm-proto)))
 
-(defun gnosis-get-thema-anagnosis (id &optional custom-deck custom-tags custom-values)
+(defun gnosis-get-thema-anagnosis (id &optional custom-tags custom-values)
   "Return anagnosis value for thema ID."
   (gnosis-get-thema-custom-value id :anagnosis #'min gnosis-algorithm-anagnosis-value
-				 nil custom-deck custom-tags custom-values))
+				 nil custom-tags custom-values))
 
-(defun gnosis-get-thema-lethe (id &optional custom-deck custom-tags custom-values)
+(defun gnosis-get-thema-lethe (id &optional custom-tags custom-values)
   "Return lethe value for thema ID."
   (gnosis-get-thema-custom-value id :lethe #'min gnosis-algorithm-lethe-value
-				 nil custom-deck custom-tags custom-values))
+				 nil custom-tags custom-values))
 
 (defun gnosis-get-date-total-themata (&optional date)
   "Return total themata reviewed for DATE.
@@ -1424,20 +1423,12 @@ Return thema ids for themata that match QUERY."
 
 ;;; Database Schemas
 (defconst gnosis-db--schemata
-  '((decks
-     ([(id integer :primary-key)
-       (name text :not-null)]
-      (:unique [name])))
-    (themata
+  '((themata
      ([(id integer :primary-key)
        (type text :not-null)
        (keimenon text :not-null)
        (hypothesis text :not-null)
-       (answer text :not-null)
-       (tags text :default untagged)
-       (deck-id integer :not-null)]
-      (:foreign-key [deck-id] :references decks [id]
-		    :on-delete :cascade)))
+       (answer text :not-null)]))
     (review
      ([(id integer :primary-key :not-null) ;; thema-id
        (gnosis integer :not-null)
@@ -1466,122 +1457,318 @@ Return thema ids for themata that match QUERY."
        (review-image string)]
       (:foreign-key [id] :references themata [id]
 		    :on-delete :cascade)))
-    (tags
-     ([(tag text :primary-key)]
-      (:unique [tag])))
-    (links
+    (thema-tag
+     ([(thema-id integer :not-null)
+       (tag text :not-null)]
+      (:foreign-key [thema-id] :references themata [id]
+		    :on-delete :cascade)
+      (:unique [thema-id tag])))
+    (thema-links
      ([(source integer)
        (dest text)]
       (:foreign-key [source] :references themata [id]
+		    :on-delete :cascade)
+      (:unique [source dest])))
+    ;; Node tables (merged from org-gnosis)
+    (nodes
+     ([(id text :not-null :primary-key)
+       (file text :not-null)
+       (title text :not-null)
+       (level text :not-null)
+       (tags text)
+       (mtime text)
+       (hash text)]))
+    (journal
+     ([(id text :not-null :primary-key)
+       (file text :not-null)
+       (title text :not-null)
+       (level text :not-null)
+       (tags text)
+       (mtime text)
+       (hash text)]))
+    (node-tag
+     ([(node-id text :not-null)
+       (tag text :not-null)]
+      (:foreign-key [node-id] :references nodes [id]
+		    :on-delete :cascade)
+      (:unique [node-id tag])))
+    (node-links
+     ([(source text)
+       (dest text)]
+      (:foreign-key [source] :references nodes [id]
 		    :on-delete :cascade)
       (:unique [source dest])))))
 
 (defun gnosis--db-version ()
   "Return the current user_version pragma from the database."
-  (caar (emacsql (gnosis--ensure-db) [:pragma user-version])))
+  (caar (gnosis-sqlite-select (gnosis--ensure-db) "PRAGMA user_version")))
 
 (defun gnosis--db-set-version (version)
   "Set the database user_version pragma to VERSION."
-  (emacsql (gnosis--ensure-db) `[:pragma (= user-version ,version)]))
+  (gnosis-sqlite-execute (gnosis--ensure-db)
+			 (format "PRAGMA user_version = %d" version)))
 
 (defun gnosis--db-create-tables ()
   "Create all tables and set version to current.
 Used for fresh databases only."
-  (emacsql-with-transaction (gnosis--ensure-db)
+  (gnosis-sqlite-with-transaction (gnosis--ensure-db)
     (pcase-dolist (`(,table ,schema) gnosis-db--schemata)
-      (emacsql (gnosis--ensure-db) [:create-table $i1 $S2] table schema))
+      (gnosis-sqlite-execute (gnosis--ensure-db)
+			     (format "CREATE TABLE %s (%s)"
+				     (gnosis-sqlite--ident table)
+				     (gnosis-sqlite--compile-schema schema))))
     (gnosis--db-set-version gnosis-db-version)))
 
 (defun gnosis--db-has-tables-p ()
   "Return non-nil if the database has user tables."
-  (let ((tables (emacsql (gnosis--ensure-db)
-			 [:select name :from sqlite-master
-			  :where (= type table)])))
+  (let ((tables (gnosis-sqlite-select (gnosis--ensure-db)
+				      "SELECT name FROM sqlite_master WHERE type = 'table'")))
     (length> tables 0)))
 
 ;;; Migration helpers
 
 (defun gnosis--migrate-make-list (column)
   "Make COLUMN values into a list."
-  (let ((results (emacsql (gnosis--ensure-db)
-			  `[:select [id ,column] :from themata])))
+  (let ((col-name (gnosis-sqlite--ident column))
+	(results (gnosis-select `[id ,column] 'themata)))
     (dolist (row results)
       (let ((id (car row))
             (old-value (cadr row)))
 	(unless (listp old-value)
-	  (emacsql (gnosis--ensure-db)
-		   `[:update themata :set (= ,column $s1) :where (= id $s2)]
-		   (list old-value) id))))))
+	  (gnosis-sqlite-execute (gnosis--ensure-db)
+				 (format "UPDATE themata SET %s = ? WHERE id = ?" col-name)
+				 (list (list old-value) id)))))))
 
 (defun gnosis-db--migrate-v1 ()
   "Migration v1: rename notes table to themata."
-  (emacsql (gnosis--ensure-db) [:alter-table notes :rename-to themata])
+  (gnosis-sqlite-execute (gnosis--ensure-db) "ALTER TABLE notes RENAME TO themata")
   (gnosis--db-set-version 1))
 
+(defun gnosis--migrate-get-tags-from-column ()
+  "Read unique tags from the serialized themata.tags column.
+Used by migrations that run before the thema-tag junction table exists."
+  (cl-loop for tags in (apply 'append
+			      (gnosis-sqlite-select (gnosis--ensure-db)
+						    "SELECT DISTINCT tags FROM themata"))
+	   nconc tags into all-tags
+	   finally return (delete-dups all-tags)))
+
 (defun gnosis-db--migrate-v2 ()
-  "Migration v2: column renames, tags/links tables, data conversions."
-  (let ((db (gnosis--ensure-db))
-	(tags (gnosis-get-tags--unique)))
-    ;; Create tags and links tables
-    (pcase-dolist (`(,table ,schema) (seq-filter (lambda (schema)
-						   (member (car schema) '(links tags)))
-						 gnosis-db--schemata))
-      (emacsql db [:create-table :if-not-exists $i1 $S2] table schema))
-    (cl-loop for tag in tags
-	     do (gnosis--insert-into 'tags `[,tag]))
-    ;; Column renames
-    (emacsql db [:alter-table themata :rename-column main :to keimenon])
-    (emacsql db [:alter-table themata :rename-column options :to hypothesis])
-    (emacsql db [:alter-table extras :rename-column extra-themata :to parathema])
-    (emacsql db [:alter-table extras :rename-column images :to review-image])
-    (emacsql db [:alter-table extras :drop-column extra-image])
-    ;; Make sure all hypothesis & answer values are lists
+  "Migration v2: add deck algorithm columns and activity log."
+  (let ((db (gnosis--ensure-db)))
+    (gnosis-sqlite-execute db "ALTER TABLE decks ADD COLUMN failure_factor FLOAT")
+    (gnosis-sqlite-execute db "ALTER TABLE decks ADD COLUMN ef_increase FLOAT")
+    (gnosis-sqlite-execute db "ALTER TABLE decks ADD COLUMN ef_decrease FLOAT")
+    (gnosis-sqlite-execute db "ALTER TABLE decks ADD COLUMN ef_threshold INTEGER")
+    (gnosis-sqlite-execute db "ALTER TABLE decks ADD COLUMN initial_interval TEXT")
+    (gnosis-sqlite-execute db
+      "CREATE TABLE IF NOT EXISTS activity_log (
+         date TEXT NOT NULL, reviewed_total INTEGER NOT NULL, reviewed_new INTEGER NOT NULL)"))
+  (gnosis--db-set-version 2))
+
+(defun gnosis-db--migrate-v3 ()
+  "Migration v3: drop deck columns, rename review columns."
+  (let ((db (gnosis--ensure-db)))
+    (gnosis-sqlite-execute db "ALTER TABLE decks DROP COLUMN failure_factor")
+    (gnosis-sqlite-execute db "ALTER TABLE decks DROP COLUMN ef_increase")
+    (gnosis-sqlite-execute db "ALTER TABLE decks DROP COLUMN ef_decrease")
+    (gnosis-sqlite-execute db "ALTER TABLE decks DROP COLUMN ef_threshold")
+    (gnosis-sqlite-execute db "ALTER TABLE decks DROP COLUMN initial_interval")
+    (gnosis-sqlite-execute db "ALTER TABLE review RENAME COLUMN ef TO gnosis")
+    (gnosis-sqlite-execute db "ALTER TABLE review RENAME COLUMN ff TO amnesia")
+    (gnosis-sqlite-execute db "ALTER TABLE review DROP COLUMN interval")
+    (gnosis-sqlite-execute db
+      "CREATE TABLE IF NOT EXISTS activity_log (
+         date TEXT NOT NULL, reviewed_total INTEGER NOT NULL, reviewed_new INTEGER NOT NULL)"))
+  (gnosis--db-set-version 3))
+
+(defun gnosis-db--migrate-v4 ()
+  "Migration v4: column renames, tags/links tables, data conversions."
+  (let ((db (gnosis--ensure-db)))
+    ;; 1. Rename notes -> themata (no-op if v1 already did it)
+    (ignore-errors
+      (gnosis-sqlite-execute db "ALTER TABLE notes RENAME TO themata"))
+    ;; 2. Create tags and links tables (v5 will rename them)
+    (gnosis-sqlite-execute db
+      "CREATE TABLE IF NOT EXISTS tags (tag text PRIMARY KEY, UNIQUE (tag))")
+    (gnosis-sqlite-execute db
+      "CREATE TABLE IF NOT EXISTS links (source integer, dest text,
+         FOREIGN KEY (source) REFERENCES themata (id) ON DELETE CASCADE,
+         UNIQUE (source, dest))")
+    ;; 3. Populate tags from serialized themata.tags column
+    (let ((tags (gnosis--migrate-get-tags-from-column)))
+      (cl-loop for tag in tags
+               do (gnosis-sqlite-execute db
+                    "INSERT OR IGNORE INTO tags VALUES (?)" (list tag))))
+    ;; 4. Column renames
+    (gnosis-sqlite-execute db "ALTER TABLE themata RENAME COLUMN main TO keimenon")
+    (gnosis-sqlite-execute db "ALTER TABLE themata RENAME COLUMN options TO hypothesis")
+    (gnosis-sqlite-execute db "ALTER TABLE extras RENAME COLUMN extra_notes TO parathema")
+    (gnosis-sqlite-execute db "ALTER TABLE extras RENAME COLUMN images TO review_image")
+    (gnosis-sqlite-execute db "ALTER TABLE extras DROP COLUMN extra_image")
+    ;; 5. Make sure all hypothesis & answer values are lists
     (gnosis--migrate-make-list 'hypothesis)
     (gnosis--migrate-make-list 'answer)
-    ;; Fix MCQs
+    ;; 6. Fix MCQ integer answers
     (cl-loop for thema in (gnosis-select 'id 'themata '(= type "mcq") t)
-	     do (let* ((data (gnosis-select '[hypothesis answer] 'themata
-					    `(= id ,thema) t))
-		       (hypothesis (nth 0 data))
-		       (old-answer (car (nth 1 data)))
-		       (new-answer (when (integerp old-answer)
-				     (list (nth (- 1 old-answer) hypothesis)))))
-		  (when (integerp old-answer)
-		    (gnosis-update 'themata `(= answer ',new-answer)
-				   `(= id ,thema)))))
-    ;; Replace y-or-n with MCQ
+             do (let* ((data (gnosis-select '[hypothesis answer] 'themata
+                              `(= id ,thema) t))
+                       (hypothesis (nth 0 data))
+                       (old-answer (car (nth 1 data)))
+                       (new-answer (when (integerp old-answer)
+                                     (list (nth (1- old-answer) hypothesis)))))
+                  (when (integerp old-answer)
+                    (gnosis-update 'themata `(= answer ',new-answer)
+                                   `(= id ,thema)))))
+    ;; 7. Replace y-or-n with MCQ
     (cl-loop for thema in (gnosis-select 'id 'themata '(= type "y-or-n") t)
-	     do (let ((data (gnosis-select '[type hypothesis answer]
-					   'themata `(= id ,thema) t)))
-		  (when (string= (nth 0 data) "y-or-n")
-		    (gnosis-update 'themata '(= type "mcq") `(= id ,thema))
-		    (gnosis-update 'themata '(= hypothesis '("Yes" "No"))
-				   `(= id ,thema))
-		    (if (= (car (nth 2 data)) 121)
-			(gnosis-update 'themata '(= answer '("Yes"))
-				       `(= id ,thema))
-		      (gnosis-update 'themata '(= answer '("No"))
-				     `(= id ,thema))))))
-    ;; Replace - with _, org does not support tags with dash.
-    (cl-loop for tag in (gnosis-get-tags--unique)
-	     if (string-match-p "-" tag)
-	     do (gnosis-tag-rename tag (replace-regexp-in-string "-" "_" tag))))
-  (gnosis--db-set-version 2))
+             do (let ((data (gnosis-select '[type hypothesis answer]
+                              'themata `(= id ,thema) t)))
+                  (when (string= (nth 0 data) "y-or-n")
+                    (gnosis-update 'themata '(= type "mcq") `(= id ,thema))
+                    (gnosis-update 'themata '(= hypothesis '("Yes" "No"))
+                                   `(= id ,thema))
+                    (if (= (car (nth 2 data)) 121)
+                        (gnosis-update 'themata '(= answer '("Yes"))
+                                       `(= id ,thema))
+                      (gnosis-update 'themata '(= answer '("No"))
+                                     `(= id ,thema))))))
+    ;; 8. Replace - with _ in tags (org does not support tags with dash)
+    (cl-loop for tag in (gnosis--migrate-get-tags-from-column)
+             if (string-match-p "-" tag)
+             do (let ((new-tag (replace-regexp-in-string "-" "_" tag)))
+                  (cl-loop for thema in (gnosis-select 'id 'themata
+                                          `(like tags ',(format "%%\"%s\"%%" tag)) t)
+                           do (let* ((tags-val (car (gnosis-select '[tags] 'themata `(= id ,thema) t)))
+                                     (new-tags (cl-substitute new-tag tag tags-val :test #'string-equal)))
+                                (gnosis-update 'themata `(= tags ',new-tags) `(= id ,thema))))
+                  (gnosis-sqlite-execute db "DELETE FROM tags")
+                  (cl-loop for tag-item in (gnosis--migrate-get-tags-from-column)
+                           do (gnosis-sqlite-execute db "INSERT OR IGNORE INTO tags VALUES (?)"
+                                                     (list tag-item))))))
+  (gnosis--db-set-version 4))
+
+(defun gnosis-db--migrate-v5 ()
+  "Migration v5: rename notes table to themata."
+  (ignore-errors
+    (gnosis-sqlite-execute (gnosis--ensure-db) "ALTER TABLE notes RENAME TO themata"))
+  (gnosis--db-set-version 5))
+
+(defun gnosis-db--migrate-v6 ()
+  "Migration v6: merge org-gnosis tables, rename links/tags."
+  (let ((db (gnosis--ensure-db)))
+    ;; 0. Move deck names into thema tags, then drop decks
+    (ignore-errors
+      (let ((rows (gnosis-sqlite-select db
+                    "SELECT t.id, t.tags, d.name
+                     FROM themata t JOIN decks d ON t.deck_id = d.id")))
+        (dolist (row rows)
+          (let* ((thema-id (nth 0 row))
+                 (tags (nth 1 row))
+                 (deck-name (nth 2 row))
+                 (new-tags (if (listp tags)
+                               (append tags (list deck-name))
+                             (list tags deck-name))))
+            (gnosis-sqlite-execute db
+              "UPDATE themata SET tags = ? WHERE id = ?"
+              (list new-tags thema-id))))))
+    (ignore-errors
+      (gnosis-sqlite-execute db "ALTER TABLE themata DROP COLUMN deck_id"))
+    (ignore-errors
+      (gnosis-sqlite-execute db "DROP TABLE IF EXISTS decks"))
+    ;; 1. Rename existing tables (idempotent for PRAGMA 5 users)
+    (ignore-errors
+      (gnosis-sqlite-execute db "ALTER TABLE links RENAME TO thema_links"))
+    (ignore-errors
+      (gnosis-sqlite-execute db "ALTER TABLE tags RENAME TO thema_tags"))
+    ;; 2. Create thema-tag junction table & populate from themata.tags
+    (let ((schema (cadr (assq 'thema-tag gnosis-db--schemata))))
+      (gnosis-sqlite-execute db
+        (format "CREATE TABLE IF NOT EXISTS %s (%s)"
+		(gnosis-sqlite--ident 'thema-tag)
+		(gnosis-sqlite--compile-schema schema))))
+    (let ((rows (gnosis-sqlite-select db "SELECT id, tags FROM themata")))
+      (dolist (row rows)
+	(let ((thema-id (car row))
+	      (tags (cadr row)))
+	  (when (listp tags)
+	    (dolist (tag tags)
+	      (ignore-errors
+		(gnosis-sqlite-execute db
+		  "INSERT OR IGNORE INTO thema_tag (thema_id, tag) VALUES (?, ?)"
+		  (list thema-id tag))))))))
+    ;; Drop serialized tags column (now replaced by thema-tag junction table)
+    (ignore-errors
+      (gnosis-sqlite-execute db "ALTER TABLE themata DROP COLUMN tags"))
+    ;; Drop thema-tags and node-tags lookup tables
+    (ignore-errors
+      (gnosis-sqlite-execute db "DROP TABLE IF EXISTS thema_tags"))
+    (ignore-errors
+      (gnosis-sqlite-execute db "DROP TABLE IF EXISTS node_tags"))
+    ;; 3. Create node tables
+    (dolist (table '(nodes journal node-tag node-links))
+      (let ((schema (cadr (assq table gnosis-db--schemata))))
+        (gnosis-sqlite-execute db
+          (format "CREATE TABLE IF NOT EXISTS %s (%s)"
+                  (gnosis-sqlite--ident table)
+                  (gnosis-sqlite--compile-schema schema)))))
+    ;; 3. Create indexes
+    (gnosis-sqlite-execute db
+      "CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes (file)")
+    (gnosis-sqlite-execute db
+      "CREATE INDEX IF NOT EXISTS idx_journal_file ON journal (file)")
+    ;; 4. Import from org-gnosis.db if it exists
+    (let ((org-db-file (locate-user-emacs-file "org-gnosis.db")))
+      (when (file-exists-p org-db-file)
+        (gnosis-sqlite-execute db
+          (format "ATTACH DATABASE '%s' AS org_gnosis"
+                  (expand-file-name org-db-file)))
+        (ignore-errors
+          (gnosis-sqlite-execute db
+            "INSERT OR IGNORE INTO nodes SELECT * FROM org_gnosis.nodes")
+          (gnosis-sqlite-execute db
+            "INSERT OR IGNORE INTO journal SELECT * FROM org_gnosis.journal")
+          (gnosis-sqlite-execute db
+            "INSERT OR IGNORE INTO node_tag SELECT * FROM org_gnosis.node_tag")
+          (gnosis-sqlite-execute db
+            "INSERT OR IGNORE INTO node_links SELECT * FROM org_gnosis.links"))
+        (gnosis-sqlite-execute db "DETACH DATABASE org_gnosis")
+        (message "Imported org-gnosis data into unified database"))))
+  (gnosis--db-set-version 6))
 
 (defconst gnosis-db--migrations
   `((1 . gnosis-db--migrate-v1)
-    (2 . gnosis-db--migrate-v2))
+    (2 . gnosis-db--migrate-v2)
+    (3 . gnosis-db--migrate-v3)
+    (4 . gnosis-db--migrate-v4)
+    (5 . gnosis-db--migrate-v5)
+    (6 . gnosis-db--migrate-v6))
   "Alist of (VERSION . FUNCTION).
 Each migration brings the DB from VERSION-1 to VERSION.")
 
 (defun gnosis--db-run-migrations (current-version)
-  "Run all pending migrations from CURRENT-VERSION to `gnosis-db-version'."
-  (cl-loop for (version . func) in gnosis-db--migrations
-	   when (> version current-version)
-	   do (progn
-		(message "Gnosis: running migration to v%d..." version)
-		(funcall func)
-		(message "Gnosis: migration to v%d complete" version))))
+  "Run all pending migrations from CURRENT-VERSION to `gnosis-db-version'.
+Commits the database after all migrations complete."
+  (let ((migrated nil))
+    (cl-loop for (version . func) in gnosis-db--migrations
+	     when (> version current-version)
+	     do (progn
+		  (message "Gnosis: running migration to v%d..." version)
+		  (funcall func)
+		  (message "Gnosis: migration to v%d complete" version)
+		  (setq migrated version)))
+    (when migrated
+      (gnosis--commit-migration current-version migrated))))
+
+(defun gnosis--commit-migration (from to)
+  "Commit database after migrating from version FROM to TO."
+  (let ((default-directory gnosis-dir))
+    (unless gnosis-testing
+      (when (file-exists-p (expand-file-name ".git" gnosis-dir))
+	(call-process (executable-find "git") nil nil nil "add" "gnosis.db")
+	(gnosis--git-cmd
+	 (list "commit" "-m"
+	       (format "Migrate database v%d -> v%d" from to)))))))
 
 (defun gnosis-db-init ()
   "Initialize database: create tables if fresh, run pending migrations."
@@ -1636,10 +1823,10 @@ Reopens the gnosis database after successful pull."
          (when (zerop (process-exit-status proc))
 	   (condition-case err
 	       (progn
-		 (when (and gnosis-db (emacsql-live-p gnosis-db))
-		   (emacsql-close gnosis-db))
+		 (when (and gnosis-db (gnosis-sqlite-live-p gnosis-db))
+		   (gnosis-sqlite-close gnosis-db))
 		 (setf gnosis-db
-                       (emacsql-sqlite-open (expand-file-name "gnosis.db" gnosis-dir)))
+                       (gnosis-sqlite-open (expand-file-name "gnosis.db" gnosis-dir)))
 		 (gnosis-db-init)
 		 (message "Gnosis: Pull successful, database reopened"))
 	     (error (message "Gnosis: Failed to reopen database: %s"
@@ -1703,7 +1890,7 @@ Reopens the gnosis database after successful pull."
 
 (defun gnosis--update-themata-keimenon (updates)
   "Apply UPDATES list of (ID . NEW-KEIMENON) to database."
-  (emacsql-with-transaction (gnosis--ensure-db)
+  (gnosis-sqlite-with-transaction (gnosis--ensure-db)
     (dolist (update updates)
       (gnosis-update 'themata `(= keimenon ,(cdr update)) `(= id ,(car update))))))
 
@@ -1743,7 +1930,7 @@ Return list of updated thema IDs."
   "Replace all instances of STRING in themata keimenon with org-link to NODE-ID."
   (interactive
    (let* ((string (read-string "String to replace: "))
-          (nodes (org-gnosis-select '[id title] 'nodes))
+          (nodes (gnosis-select '[id title] 'nodes))
           (node-title (gnosis-completing-read "Select node: " (mapcar #'cadr nodes)))
           (node-id (car (cl-find node-title nodes :key #'cadr :test #'string=))))
      (list string node-id)))
@@ -1752,20 +1939,20 @@ Return list of updated thema IDs."
 ;;; Link integrity
 
 (defun gnosis--all-link-dests ()
-  "Return all unique dest UUIDs from gnosis links table."
-  (cl-remove-duplicates (gnosis-select 'dest 'links nil t) :test #'equal))
+  "Return all unique dest UUIDs from gnosis thema-links table."
+  (cl-remove-duplicates (gnosis-select 'dest 'thema-links nil t) :test #'equal))
 
 (defun gnosis--orphaned-link-dests ()
-  "Return dest UUIDs in gnosis links that have no matching org-gnosis node."
+  "Return dest UUIDs in thema-links that have no matching node."
   (let ((link-dests (gnosis--all-link-dests))
-        (node-ids (org-gnosis-select 'id 'nodes nil t)))
+        (node-ids (gnosis-select 'id 'nodes nil t)))
     (cl-set-difference link-dests node-ids :test #'equal)))
 
 (defun gnosis--orphaned-links ()
-  "Return (source dest) rows where dest has no matching org-gnosis node."
+  "Return (source dest) rows where dest has no matching node."
   (let ((orphaned-dests (gnosis--orphaned-link-dests)))
     (when orphaned-dests
-      (gnosis-select '[source dest] 'links
+      (gnosis-select '[source dest] 'thema-links
                      `(in dest ,(vconcat orphaned-dests))))))
 
 (defun gnosis--thema-expected-links (keimenon parathema)
@@ -1777,10 +1964,10 @@ Return list of updated thema IDs."
 
 (defun gnosis--stale-links ()
   "Return (source dest) pairs in DB but not in thema text.
-Fetches all themata, extras, and links in bulk queries."
+Fetches all themata, extras, and thema-links in bulk queries."
   (let* ((themata (gnosis-select '[id keimenon] 'themata nil))
          (extras (gnosis-select '[id parathema] 'extras nil))
-         (all-links (gnosis-select '[source dest] 'links nil))
+         (all-links (gnosis-select '[source dest] 'thema-links nil))
          (extras-map (make-hash-table :test 'equal)))
     ;; Build extras lookup
     (dolist (extra extras)
@@ -1796,10 +1983,10 @@ Fetches all themata, extras, and links in bulk queries."
 
 (defun gnosis--missing-links ()
   "Return (source dest) pairs in thema text but not in DB.
-Fetches all themata, extras, and links in bulk queries."
+Fetches all themata, extras, and thema-links in bulk queries."
   (let* ((themata (gnosis-select '[id keimenon] 'themata nil))
          (extras (gnosis-select '[id parathema] 'extras nil))
-         (all-links (gnosis-select '[source dest] 'links nil))
+         (all-links (gnosis-select '[source dest] 'thema-links nil))
          (extras-map (make-hash-table :test 'equal))
          (links-set (make-hash-table :test 'equal)))
     ;; Build extras lookup
@@ -1820,7 +2007,7 @@ Fetches all themata, extras, and links in bulk queries."
 
 ;;;###autoload
 (defun gnosis-links-check ()
-  "Report link health between gnosis and org-gnosis databases."
+  "Report link health for thema-links."
   (interactive)
   (let ((orphaned (gnosis--orphaned-link-dests))
         (stale (gnosis--stale-links))
@@ -1829,27 +2016,28 @@ Fetches all themata, extras, and links in bulk queries."
              (length orphaned) (length stale) (length missing))))
 
 (defun gnosis--delete-orphaned-links (orphaned-dests)
-  "Delete links whose dest is in ORPHANED-DESTS."
+  "Delete thema-links whose dest is in ORPHANED-DESTS."
   (when orphaned-dests
-    (emacsql-with-transaction (gnosis--ensure-db)
-      (emacsql (gnosis--ensure-db) `[:delete :from links
-                           :where (in dest ,(vconcat orphaned-dests))]))))
+    (gnosis-sqlite-with-transaction (gnosis--ensure-db)
+      (gnosis-sqlite-execute-batch (gnosis--ensure-db)
+        "DELETE FROM thema_links WHERE dest IN (%s)"
+        orphaned-dests))))
 
 (defun gnosis--delete-stale-links (stale-links)
-  "Delete STALE-LINKS list of (source dest) from links table."
+  "Delete STALE-LINKS list of (source dest) from thema-links table."
   (when stale-links
-    (emacsql-with-transaction (gnosis--ensure-db)
+    (gnosis-sqlite-with-transaction (gnosis--ensure-db)
       (dolist (link stale-links)
-        (emacsql (gnosis--ensure-db) `[:delete :from links
-                             :where (and (= source ,(car link))
-                                         (= dest ,(cadr link)))])))))
+	(gnosis-sqlite-execute (gnosis--ensure-db)
+			       "DELETE FROM thema_links WHERE source = ? AND dest = ?"
+			       (list (car link) (cadr link)))))))
 
 (defun gnosis--insert-missing-links (missing-links)
-  "Insert MISSING-LINKS list of (source dest) into links table."
+  "Insert MISSING-LINKS list of (source dest) into thema-links table."
   (when missing-links
-    (emacsql-with-transaction (gnosis--ensure-db)
+    (gnosis-sqlite-with-transaction (gnosis--ensure-db)
       (dolist (link missing-links)
-        (gnosis--insert-into 'links `([,(car link) ,(cadr link)]))))))
+        (gnosis--insert-into 'thema-links `([,(car link) ,(cadr link)]))))))
 
 (defun gnosis--commit-link-cleanup (orphaned stale missing)
   "Commit link cleanup changes for ORPHANED, STALE, and MISSING counts."

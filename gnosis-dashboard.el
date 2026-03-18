@@ -29,7 +29,7 @@
 
 (require 'gnosis)
 (require 'gnosis-tl)
-(require 'org-gnosis)
+(require 'gnosis-nodes)
 
 (defface gnosis-face-dashboard-header
   '((t :inherit (bold font-lock-constant-face)))
@@ -101,7 +101,7 @@ or `gnosis-dashboard-rebuild-cache'.")
 (defvar gnosis-dashboard--view-history nil
   "Stack of previous dashboard views for cross-mode navigation.
 Each entry is a function to restore that view
- (e.g. `gnosis-dashboard-output-decks').")
+ (e.g. `gnosis-dashboard-output-tags').")
 
 (defvar gnosis-dashboard-themata-current-ids nil
   "Current list of thema IDs being displayed.")
@@ -111,6 +111,15 @@ Each entry is a function to restore that view
 
 (defvar gnosis-dashboard-nodes-current-ids nil
   "Current list of node IDs being displayed.")
+
+(defvar gnosis-dashboard-tags-history nil
+  "Stack of previous tag views for navigation history.")
+
+(defvar gnosis-dashboard-tags-current nil
+  "Current list of tags being displayed.")
+
+(defvar gnosis-dashboard-tags-count-ht nil
+  "Hash table mapping tag name to thema count, cached for filtering.")
 
 (defvar gnosis-dashboard--load-generation 0
   "Generation counter to cancel stale async loads.")
@@ -190,8 +199,6 @@ Safe to call multiple times; always rebuilds from the base header."
 	 (ids (plist-get current-values :ids)))
     (cond ((eq type 'themata)
 	   (gnosis-dashboard-output-themata ids))
-	  ((eq type 'decks)
-	   (gnosis-dashboard-output-decks))
 	  ((eq type 'tags)
 	   (gnosis-dashboard-output-tags))
 	  ((eq type 'history)
@@ -217,23 +224,52 @@ DATES: Dates in the activity log, a list of dates in (YYYY MM DD)."
   (let ((id (tabulated-list-get-id)))
     (gnosis-edit-thema id)))
 
+(defun gnosis-dashboard--update-suspend-column (ids suspend-str)
+  "Update the suspend column to SUSPEND-STR for cached entries with IDS.
+Avoids re-fetching from the database."
+  (let ((id-set (make-hash-table :test 'equal :size (length ids))))
+    (dolist (id ids) (puthash id t id-set))
+    ;; Update cache
+    (dolist (id ids)
+      (let ((entry (gethash id gnosis-dashboard--entry-cache)))
+        (when entry
+          (let ((vec (cadr entry)))
+            (aset vec (1- (length vec)) suspend-str)))))
+    ;; Update tabulated-list-entries in place
+    (dolist (entry tabulated-list-entries)
+      (when (gethash (car entry) id-set)
+        (let ((vec (cadr entry)))
+          (aset vec (1- (length vec)) suspend-str))))
+    (setq gnosis-dashboard--rendered-text nil)
+    (tabulated-list-print t)))
+
 (defun gnosis-dashboard-suspend-thema ()
-  "Suspend thema."
+  "Suspend or unsuspend themata.
+With prefix arg (C-u), unsuspend.  Without, suspend.
+For a single thema (no selection), toggles current value."
+  (interactive nil gnosis-dashboard-themata-mode)
+  (let* ((ids (or gnosis-dashboard--selected-ids
+                  (list (tabulated-list-get-id))))
+         (suspend-value (when (> (length ids) 1)
+                          (if current-prefix-arg 0 1))))
+    (gnosis-toggle-suspend-themata ids suspend-value)
+    (if (> (length ids) 1)
+        (gnosis-dashboard--update-suspend-column
+         ids (if (eql suspend-value 0) "No" "Yes"))
+      (gnosis-dashboard--update-entries ids))
+    (setq gnosis-dashboard--selected-ids nil)
+    (when (and (not current-prefix-arg) (> (length ids) 1))
+      (message (format "Use %s to unsuspend." (propertize "C-u s" 'face 'font-lock-constant-face))))))
+
+(defun gnosis-dashboard-delete ()
+  "Delete marked themata or thema at point."
   (interactive nil gnosis-dashboard-themata-mode)
   (let ((ids (or gnosis-dashboard--selected-ids
                  (list (tabulated-list-get-id)))))
-    (gnosis-toggle-suspend-themata ids)
-    (gnosis-dashboard--update-entries ids)
-    (setq gnosis-dashboard--selected-ids nil)))
-
-(defun gnosis-dashboard-delete ()
-  "Delete thema."
-  (interactive)
-  (if gnosis-dashboard--selected-ids
-      (gnosis-dashboard-marked-delete)
-    (let ((id (tabulated-list-get-id)))
-      (gnosis-delete-thema id)
-      (gnosis-dashboard--remove-entries (list id)))))
+    (when (y-or-n-p (format "Delete %d themata?" (length ids)))
+      (gnosis-delete-themata ids)
+      (gnosis-dashboard--remove-entries ids)
+      (setq gnosis-dashboard--selected-ids nil))))
 
 (defun gnosis-dashboard-search-thema (&optional str)
   "Search for themata with STR."
@@ -317,7 +353,7 @@ With prefix arg, prompt for count.  Default 0 (never reviewed)."
          gnosis-dashboard-themata-mode
          gnosis-dashboard-nodes-history)
     (gnosis-dashboard-nodes-back))
-   ;; If view history exists, go back to previous view (decks, tags, etc.)
+   ;; If view history exists, go back to previous view (tags, etc.)
    (gnosis-dashboard--view-history
     (funcall (pop gnosis-dashboard--view-history)))
    ;; Otherwise go to main dashboard
@@ -338,7 +374,8 @@ With prefix arg, prompt for count.  Default 0 (never reviewed)."
     ("a" "Add thema" gnosis-add-thema :transient t)
     ("s" "Suspend" gnosis-dashboard-suspend-thema :transient t)
     ("d" "Delete" gnosis-dashboard-delete :transient t)
-    ("b" "Bulk link" gnosis-dashboard-bulk-link :transient t)]
+    ("b" "Bulk link" gnosis-dashboard-bulk-link :transient t)
+    ("t" "Modify tags" gnosis-dashboard-modify-tags :transient t)]
    ["Mark"
     ("m" "Toggle mark" gnosis-dashboard-mark-toggle :transient t)
     ("M" "Mark all" gnosis-dashboard-mark-all :transient t)
@@ -362,6 +399,7 @@ With prefix arg, prompt for count.  Default 0 (never reviewed)."
   "m" #'gnosis-dashboard-mark-toggle
   "M" #'gnosis-dashboard-mark-all
   "b" #'gnosis-dashboard-bulk-link
+  "t" #'gnosis-dashboard-modify-tags
   "u" #'gnosis-dashboard-mark-toggle
   "U" #'gnosis-dashboard-unmark-all
 )
@@ -395,13 +433,9 @@ Uses `gnosis-dashboard--entry-cache' to avoid re-querying known entries."
 		    thema-ids)))
     ;; Fetch and cache only the missing entries
     (when uncached
-      (let ((rows (emacsql (gnosis--ensure-db)
-			   `[:select
-			     [themata:id themata:keimenon themata:hypothesis themata:answer
-				       themata:tags themata:type review-log:suspend]
-			     :from themata
-			     :join review-log :on (= themata:id review-log:id)
-			     :where (in themata:id ,(vconcat uncached))])))
+      (let ((rows (gnosis-sqlite-select-batch (gnosis--ensure-db)
+                    "SELECT themata.id, themata.keimenon, themata.hypothesis, themata.answer, (SELECT '(' || GROUP_CONCAT(tag, ' ') || ')' FROM thema_tag WHERE thema_id = themata.id) AS tags, themata.type, review_log.suspend FROM themata JOIN review_log ON themata.id = review_log.id WHERE themata.id IN (%s)"
+                    uncached)))
 	(dolist (row rows)
 	  (puthash (car row) (gnosis-dashboard--format-entry row)
 		   gnosis-dashboard--entry-cache))))
@@ -491,13 +525,9 @@ Continues as long as the dashboard buffer exists."
                       ids))
            (new-warmed (+ warmed (length ids))))
       (when uncached
-        (let ((rows (emacsql (gnosis--ensure-db)
-                     `[:select
-                       [themata:id themata:keimenon themata:hypothesis themata:answer
-                                   themata:tags themata:type review-log:suspend]
-                       :from themata
-                       :join review-log :on (= themata:id review-log:id)
-                       :where (in themata:id ,(vconcat uncached))])))
+        (let ((rows (gnosis-sqlite-select-batch (gnosis--ensure-db)
+                      "SELECT themata.id, themata.keimenon, themata.hypothesis, themata.answer, (SELECT '(' || GROUP_CONCAT(tag, ' ') || ')' FROM thema_tag WHERE thema_id = themata.id) AS tags, themata.type, review_log.suspend FROM themata JOIN review_log ON themata.id = review_log.id WHERE themata.id IN (%s)"
+                      uncached)))
           (dolist (row rows)
             (puthash (car row) (gnosis-dashboard--format-entry row)
                      gnosis-dashboard--entry-cache))))
@@ -664,11 +694,9 @@ GEN: load generation — no-op if stale."
   (cl-assert (listp thema-ids) t "`thema-ids' must be a list of thema ids.")
   (cl-incf gnosis-dashboard--load-generation)
   (pop-to-buffer-same-window gnosis-dashboard-buffer-name)
-  (goto-char (point-min))
   (gnosis-dashboard-enable-mode)
   ;; Disable other dashboard modes
   (gnosis-dashboard-nodes-mode -1)
-  (gnosis-dashboard-decks-mode -1)
   (gnosis-dashboard-tags-mode -1)
   ;; Enable themata mode
   (gnosis-dashboard-themata-mode 1)
@@ -698,14 +726,10 @@ GEN: load generation — no-op if stale."
         (when sorter
           (setq entries (sort entries sorter)))
         (gnosis-dashboard--progressive-render
-         entries gnosis-dashboard--load-generation))))
+         entries gnosis-dashboard--load-generation)))
+    (goto-char (point-min)))
   (gnosis-dashboard--set-header-line (length thema-ids)))
 
-(defun gnosis-dashboard-deck-thema-count (id)
-  "Return total thema count for deck with ID."
-  (let ((thema-count (length (gnosis-select 'id 'themata `(= deck-id ,id) t))))
-    (when (gnosis-select 'id 'decks `(= id ,id))
-      (list (number-to-string thema-count)))))
 
 (defun gnosis-dashboard-output-tag (tag)
   "Output TAG name and total themata."
@@ -718,55 +742,142 @@ GEN: load generation — no-op if stale."
         (total2 (string-to-number (elt (cadr entry2) 1))))
     (< total1 total2)))
 
+(defun gnosis-dashboard--invalidate-tag-caches ()
+  "Clear entry and render caches after tag mutations.
+Cached themata entries embed tag strings, so any tag rename/delete
+must flush these before the next themata view."
+  (clrhash gnosis-dashboard--entry-cache)
+  (setq gnosis-dashboard--rendered-text nil))
+
 (defun gnosis-dashboard-rename-tag ()
   "Rename TAG to NEW-TAG."
   (interactive)
   (let ((current-line (line-number-at-pos)))
     (gnosis-tag-rename (tabulated-list-get-id))
+    (gnosis-dashboard--invalidate-tag-caches)
     (gnosis-dashboard-output-tags)
     (forward-line (- current-line 1))))
 
+(defun gnosis-dashboard-bulk-rename-tags ()
+  "Bulk-rename marked (or all displayed) tags via regex.
+Prompts for a regex pattern and replacement string, previews
+which tags will be renamed (and how many will merge), then
+applies via `gnosis--tag-rename-batch'."
+  (interactive)
+  (let* ((tags (or (and gnosis-dashboard--selected-ids
+		       (prog1 gnosis-dashboard--selected-ids
+			 (setq gnosis-dashboard--selected-ids nil)))
+		   gnosis-dashboard-tags-current))
+	 (pattern (gnosis-dashboard--pcre-to-emacs
+		   (read-string "Rename pattern (regex): ")))
+	 (replacement (replace-regexp-in-string
+		       "-" "_"
+		       (read-string "Replacement: ")))
+	 (all-tags (mapcar #'car (gnosis-sqlite-select (gnosis--ensure-db)
+				"SELECT DISTINCT tag FROM thema_tag")))
+	 (existing-ht (let ((ht (make-hash-table :test 'equal)))
+			(dolist (t1 all-tags ht)
+			  (puthash t1 t ht))))
+	 pairs)
+    (dolist (tag tags)
+      (let ((new (replace-regexp-in-string pattern replacement tag)))
+	(unless (string= tag new)
+	  (push (cons tag new) pairs))))
+    (unless pairs
+      (user-error "No tags match the pattern"))
+    (let ((merges (cl-count-if (lambda (p) (gethash (cdr p) existing-ht))
+			       pairs)))
+      (when (y-or-n-p (format "Rename %d tag(s)%s?"
+			      (length pairs)
+			      (if (> merges 0)
+				  (format " (%d will merge into existing)" merges)
+				"")))
+	(gnosis--tag-rename-batch pairs)
+	(gnosis-dashboard--invalidate-tag-caches)
+	(remove-overlays nil nil 'gnosis-mark t)
+	(gnosis-dashboard-output-tags)))))
+
+(defun gnosis-dashboard-merge-case-duplicates ()
+  "Merge tags that differ only by case.
+For each group of case-variants, the most-used tag is kept as
+canonical; ties are broken alphabetically.  The rest are renamed
+to the canonical form via `gnosis--tag-rename-batch'."
+  (interactive)
+  (let* ((tag-counts (gnosis-sqlite-select (gnosis--ensure-db)
+		       "SELECT tag, COUNT(*) FROM thema_tag GROUP BY tag"))
+	 (groups (make-hash-table :test 'equal))
+	 pairs)
+    ;; Group tags by downcased form
+    (dolist (row tag-counts)
+      (let ((tag (car row))
+	    (count (cadr row)))
+	(push (cons tag count) (gethash (downcase tag) groups))))
+    ;; Build rename pairs for groups with >1 variant
+    (maphash (lambda (_key variants)
+	       (when (> (length variants) 1)
+		 ;; Sort: highest count first, then alphabetically for ties
+		 (let* ((sorted (sort variants
+				      (lambda (a b)
+					(if (= (cdr a) (cdr b))
+					    (string< (car a) (car b))
+					  (> (cdr a) (cdr b))))))
+			(canonical (caar sorted)))
+		   (dolist (v (cdr sorted))
+		     (push (cons (car v) canonical) pairs)))))
+	     groups)
+    (if (not pairs)
+	(message "No case-duplicate tags found")
+      (when (y-or-n-p (format "Merge %d tag(s) into %d canonical form(s)?"
+			      (length pairs)
+			      (length (seq-uniq (mapcar #'cdr pairs)))))
+	(gnosis--tag-rename-batch pairs)
+	(gnosis-dashboard--invalidate-tag-caches)
+	(remove-overlays nil nil 'gnosis-mark t)
+	(gnosis-dashboard-output-tags)))))
+
 (defun gnosis-dashboard-delete-tag (&optional tag)
-  "Delete TAG from all themata."
+  "Delete TAG or marked tags from all themata."
   (interactive)
-  (let ((tag (or tag (tabulated-list-get-id))))
-    (when (y-or-n-p (format "Delete tag %s?"
-			    (propertize tag 'face 'font-lock-keyword-face)))
-      (cl-loop for thema in (gnosis-get-tag-themata tag)
-	       do (let* ((tags (car (gnosis-select '[tags] 'themata `(= id ,thema) t)))
-			 (new-tags (remove tag tags)))
-		    (gnosis-update 'themata `(= tags ',new-tags) `(= id ,thema))))
-      ;; Update tags in database
-      (gnosis-tags-refresh)
-      ;; Output tags anew
-      (gnosis-dashboard-output-tags))))
+  (let ((tags (or (and gnosis-dashboard--selected-ids
+                       (prog1 gnosis-dashboard--selected-ids
+                         (setq gnosis-dashboard--selected-ids nil)))
+                  (list (or tag (tabulated-list-get-id))))))
+    (when (y-or-n-p (format "Delete %d tag(s)?" (length tags)))
+      (gnosis-sqlite-execute-batch (gnosis--ensure-db)
+        "DELETE FROM thema_tag WHERE tag IN (%s)"
+        tags)
+      (gnosis-dashboard--invalidate-tag-caches)
+      (remove-overlays nil nil 'gnosis-mark t)
+      (setq tabulated-list-entries
+            (cl-remove-if (lambda (entry) (member (car entry) tags))
+                          tabulated-list-entries))
+      (dolist (tag tags)
+        (gnosis-tl-delete-entry tag))
+      (gnosis-dashboard--set-header-line (length tabulated-list-entries)))))
 
 
-(defun gnosis-dashboard-rename-deck (&optional deck-id new-name)
-  "Rename deck where DECK-ID with NEW-NAME."
-  (interactive)
-  (let ((deck-id (or deck-id (string-to-number (tabulated-list-get-id))))
-	(new-name (or new-name (read-string "New deck name: "))))
-    (gnosis-update 'decks `(= name ,new-name) `(= id ,deck-id))
-    (gnosis-dashboard-output-decks)))
 
 (defun gnosis-dashboard-suspend-tag (&optional tag)
-  "Suspend themata of TAG."
+  "Suspend themata of TAG or marked tags."
   (interactive)
-  (let* ((tag (or tag (tabulated-list-get-id)))
-	 (themata (gnosis-get-tag-themata tag))
-	 (suspend (if current-prefix-arg 0 1))
-	 (confirm-msg (y-or-n-p
-		       (if (= suspend 0)
-			   "Unsuspend all themata for tag? "
-			 "Suspend all themata for tag?"))))
-    (when confirm-msg
-      (emacsql (gnosis--ensure-db)
-	       `[:update review-log :set (= suspend ,suspend) :where
-			 (in id ,(vconcat themata))])
-      (if (= suspend 0)
-	  (message "Unsuspended %s themata" (length themata))
-	(message "Suspended %s themata" (length themata))))))
+  (let* ((tags (or (and gnosis-dashboard--selected-ids
+                        (prog1 gnosis-dashboard--selected-ids
+                          (setq gnosis-dashboard--selected-ids nil)))
+                   (list (or tag (tabulated-list-get-id)))))
+         (themata (mapcar #'car
+		   (gnosis-sqlite-select-batch (gnosis--ensure-db)
+		     "SELECT DISTINCT thema_id FROM thema_tag WHERE tag IN (%s)"
+		     tags)))
+         (suspend (if current-prefix-arg 0 1))
+         (action (if (= suspend 0) "Unsuspend" "Suspend")))
+    (when (y-or-n-p (format "%s %d themata across %d tag(s)?"
+                            action (length themata) (length tags)))
+      (gnosis-sqlite-execute-batch (gnosis--ensure-db)
+        "UPDATE review_log SET suspend = ? WHERE id IN (%s)"
+        themata
+        (list suspend))
+      (remove-overlays nil nil 'gnosis-mark t)
+      (message "%sed %d themata" action (length themata)))))
 
 (defun gnosis-dashboard-tag-view-themata (&optional tag)
   "View themata for TAG."
@@ -781,11 +892,19 @@ GEN: load generation — no-op if stale."
   "Transient menu for tags dashboard mode."
   [["Navigate"
     ("RET" "View themata" gnosis-dashboard-tag-view-themata)
-    ("q" "Back to dashboard" gnosis-dashboard)
+    ("q" "Back" gnosis-dashboard-tags-back)
+    ("SPC" "Search" gnosis-dashboard-search-tags)
+    ("l" "Filter current" gnosis-dashboard-filter-tags)
     ("g" "Refresh" gnosis-dashboard-return :transient t)]
+   ["Mark"
+    ("m" "Toggle mark" gnosis-dashboard-mark-toggle :transient t)
+    ("M" "Mark all" gnosis-dashboard-mark-all :transient t)
+    ("u" "Unmark" gnosis-dashboard-mark-toggle :transient t)
+    ("U" "Unmark all" gnosis-dashboard-unmark-all :transient t)]
    ["Edit"
-    ("e" "Rename tag" gnosis-dashboard-rename-tag :transient t)
     ("r" "Rename tag" gnosis-dashboard-rename-tag :transient t)
+    ("R" "Bulk regex rename" gnosis-dashboard-bulk-rename-tags :transient t)
+    ("C" "Merge case duplicates" gnosis-dashboard-merge-case-duplicates :transient t)
     ("s" "Suspend tag" gnosis-dashboard-suspend-tag :transient t)
     ("d" "Delete tag" gnosis-dashboard-delete-tag :transient t)]])
 
@@ -793,12 +912,19 @@ GEN: load generation — no-op if stale."
   "?" #'gnosis-dashboard-tags-mode-menu
   "h" #'gnosis-dashboard-tags-mode-menu
   "RET" #'gnosis-dashboard-tag-view-themata
-  "e" #'gnosis-dashboard-rename-tag
-  "q" #'gnosis-dashboard
-  "s" #'gnosis-dashboard-suspend-tag
   "r" #'gnosis-dashboard-rename-tag
+  "q" #'gnosis-dashboard-tags-back
+  "SPC" #'gnosis-dashboard-search-tags
+  "l" #'gnosis-dashboard-filter-tags
+  "s" #'gnosis-dashboard-suspend-tag
+  "R" #'gnosis-dashboard-bulk-rename-tags
+  "C" #'gnosis-dashboard-merge-case-duplicates
   "d" #'gnosis-dashboard-delete-tag
-  "g" #'gnosis-dashboard-return)
+  "g" #'gnosis-dashboard-return
+  "m" #'gnosis-dashboard-mark-toggle
+  "M" #'gnosis-dashboard-mark-all
+  "u" #'gnosis-dashboard-mark-toggle
+  "U" #'gnosis-dashboard-unmark-all)
 
 (define-minor-mode gnosis-dashboard-tags-mode
   "Mode for dashboard output of tags."
@@ -806,120 +932,92 @@ GEN: load generation — no-op if stale."
 
 (defun gnosis-dashboard-output-tags (&optional tags)
   "Format gnosis dashboard with output of TAGS."
-  (gnosis-tags-refresh) ;; Refresh tags
-  (let ((tags (or tags (gnosis-get-tags--unique))))
+  (interactive)
+  (let* ((tag-counts (gnosis-sqlite-select (gnosis--ensure-db)
+                       "SELECT tag, COUNT(*) FROM thema_tag GROUP BY tag"))
+         (count-ht (let ((ht (make-hash-table :test 'equal :size (length tag-counts))))
+                     (dolist (row tag-counts ht)
+                       (puthash (car row) (cadr row) ht))))
+         (tags (or tags (mapcar #'car tag-counts))))
+    (setq gnosis-dashboard-tags-current tags
+          gnosis-dashboard-tags-count-ht count-ht)
     (pop-to-buffer-same-window gnosis-dashboard-buffer-name)
     (gnosis-dashboard-enable-mode)
     ;; Disable other dashboard modes
     (gnosis-dashboard-themata-mode -1)
     (gnosis-dashboard-nodes-mode -1)
-    (gnosis-dashboard-decks-mode -1)
     ;; Enable tags mode
     (gnosis-dashboard-tags-mode 1)
     (setf gnosis-dashboard--current '(:type tags))
     (setq tabulated-list-format [("Name" 35 t)
                                  ("Total Themata" 10 gnosis-dashboard-sort-total-themata)])
     (tabulated-list-init-header)
+    (setq-local gnosis-dashboard--base-header-line header-line-format)
     (setq tabulated-list-entries
           (cl-loop for tag in tags
-                   for output = (gnosis-dashboard-output-tag tag)
-                   collect (list (car output)
-                                 (vconcat output))))
+                   collect (list tag
+                                 (vector tag (number-to-string
+                                              (gethash tag count-ht 0))))))
     (tabulated-list-print t)
     (gnosis-dashboard--set-header-line (length tabulated-list-entries))))
 
-(defun gnosis-dashboard-output-deck (id)
-  "Output contents from deck ID, formatted for gnosis dashboard."
-  (let* ((deck-name (gnosis-select 'name 'decks `(= id ,id) t))
-         (thema-count (gnosis-dashboard-deck-thema-count id))
-         (combined-data (append deck-name (mapcar #'string-to-number thema-count))))
-    (mapcar (lambda (item) (format "%s" item))
-            (seq-filter (lambda (item)
-                         (not (and (vectorp item) (seq-empty-p item))))
-                       combined-data))))
+(defun gnosis-dashboard--pcre-to-emacs (pattern)
+  "Convert PCRE-style braces in PATTERN to Emacs regex syntax.
+Translates {n}, {n,}, {n,m} to \\{n\\}, \\{n,\\}, \\{n,m\\}."
+  (replace-regexp-in-string
+   "{\\([0-9]+,?[0-9]*\\)}"
+   "\\\\{\\1\\\\}"
+   pattern))
 
-(transient-define-prefix gnosis-dashboard-decks-mode-menu ()
-  "Transient menu for decks dashboard mode."
-  [["Navigate"
-    ("RET" "View deck" gnosis-dashboard-decks-view-deck)
-    ("q" "Back to dashboard" gnosis-dashboard)]
-   ["Edit"
-    ("e" "Rename deck" gnosis-dashboard-rename-deck :transient t)
-    ("r" "Rename deck" gnosis-dashboard-rename-deck :transient t)
-    ("a" "Add deck" gnosis-dashboard-decks-add :transient t)
-    ("s" "Suspend deck" gnosis-dashboard-decks-suspend-deck :transient t)
-    ("d" "Delete deck" gnosis-dashboard-decks-delete :transient t)]])
-
-(defvar-keymap gnosis-dashboard-decks-mode-map
-  "?" #'gnosis-dashboard-decks-mode-menu
-  "h" #'gnosis-dashboard-decks-mode-menu
-  "e" #'gnosis-dashboard-rename-deck
-  "r" #'gnosis-dashboard-rename-deck
-  "q" #'gnosis-dashboard
-  "a" #'gnosis-dashboard-decks-add
-  "s" #'gnosis-dashboard-decks-suspend-deck
-  "d" #'gnosis-dashboard-decks-delete
-  "RET" #'gnosis-dashboard-decks-view-deck)
-
-(define-minor-mode gnosis-dashboard-decks-mode
-  "Minor mode for deck output."
-  :keymap gnosis-dashboard-decks-mode-map)
-
-(defun gnosis-dashboard-output-decks ()
-  "Return deck contents for gnosis dashboard."
-  (pop-to-buffer-same-window gnosis-dashboard-buffer-name)
-  (gnosis-dashboard-enable-mode)
-  ;; Disable other dashboard modes
-  (gnosis-dashboard-themata-mode -1)
-  (gnosis-dashboard-nodes-mode -1)
-  (gnosis-dashboard-tags-mode -1)
-  ;; Enable decks mode
-  (gnosis-dashboard-decks-mode 1)
-  (setq tabulated-list-format [("Name" 15 t)
-			       ("Total Themata" 10 gnosis-dashboard-sort-total-themata)])
-  (tabulated-list-init-header)
-  (setq tabulated-list-entries
-	(cl-loop for id in (gnosis-select 'id 'decks nil t)
-		 for output = (gnosis-dashboard-output-deck id)
-		 when output
-		 collect (list (number-to-string id) (vconcat output))))
-  (tabulated-list-print t)
-  (gnosis-dashboard--set-header-line (length tabulated-list-entries))
-  (setf gnosis-dashboard--current `(:type decks :ids ,(gnosis-select 'id 'decks nil t))))
-
-(defun gnosis-dashboard-decks-add ()
-  "Add deck & refresh."
+(defun gnosis-dashboard-filter-tags (&optional pattern)
+  "Filter current tags view by regex PATTERN."
   (interactive)
-  (gnosis-add-deck (read-string "Deck name: "))
-  (gnosis-dashboard-output-decks)
-  (revert-buffer t t t))
+  (unless gnosis-dashboard-tags-current
+    (user-error "No tags to filter"))
+  (let* ((pattern (gnosis-dashboard--pcre-to-emacs
+                   (or pattern (read-string "Filter tags (regex): "))))
+         (filtered (cl-remove-if-not
+                    (lambda (tag) (string-match-p pattern tag))
+                    gnosis-dashboard-tags-current)))
+    (if filtered
+        (progn
+          (push (cons (tabulated-list-get-id) gnosis-dashboard-tags-current)
+                gnosis-dashboard-tags-history)
+          (gnosis-dashboard-output-tags filtered))
+      (message "No tags match pattern: %s" pattern))))
 
-(defun gnosis-dashboard-decks-suspend-deck (&optional deck-id)
-  "Suspend themata for DECK-ID.
-
-When called with a prefix, unsuspend all themata of deck."
+(defun gnosis-dashboard-search-tags (&optional pattern)
+  "Search all tags by regex PATTERN."
   (interactive)
-  (let ((deck-id (or deck-id (string-to-number (tabulated-list-get-id)))))
-    (gnosis-suspend-deck deck-id)
-    (gnosis-dashboard-output-decks)
-    (revert-buffer t t t)))
+  (let* ((pattern (gnosis-dashboard--pcre-to-emacs
+                   (or pattern (read-string "Search tags (regex): "))))
+         (all-tags (mapcar #'car (gnosis-select 'tag 'thema-tag)))
+         (all-tags (seq-uniq all-tags))
+         (filtered (cl-remove-if-not
+                    (lambda (tag) (string-match-p pattern tag))
+                    all-tags)))
+    (if filtered
+        (progn
+          (when gnosis-dashboard-tags-current
+            (push (cons (tabulated-list-get-id) gnosis-dashboard-tags-current)
+                  gnosis-dashboard-tags-history))
+          (gnosis-dashboard-output-tags filtered))
+      (message "No tags match pattern: %s" pattern))))
 
-(defun gnosis-dashboard-decks-delete (&optional deck-id)
-  "Delete DECK-ID."
+(defun gnosis-dashboard-tags-back ()
+  "Go back to the previous tags view, or to main dashboard."
   (interactive)
-  (let ((deck-id (or deck-id (string-to-number (tabulated-list-get-id)))))
-    (gnosis-delete-deck deck-id)
-    (gnosis-dashboard-output-decks)
-    (revert-buffer t t t)))
-
-(defun gnosis-dashboard-decks-view-deck (&optional deck-id)
-  "View themata of DECK-ID."
-  (interactive)
-  (let ((deck-id (or deck-id (string-to-number (tabulated-list-get-id)))))
-    ;; Clear history for fresh start from decks
-    (setq gnosis-dashboard-themata-history nil)
-    (push #'gnosis-dashboard-output-decks gnosis-dashboard--view-history)
-    (gnosis-dashboard-output-themata (gnosis-collect-thema-ids :deck deck-id))))
+  (if gnosis-dashboard-tags-history
+      (let* ((previous (pop gnosis-dashboard-tags-history))
+             (previous-id (car previous))
+             (previous-tags (cdr previous)))
+        (gnosis-dashboard-output-tags previous-tags)
+        (when previous-id
+          (goto-char (point-min))
+          (while (and (not (eobp))
+                      (not (equal (tabulated-list-get-id) previous-id)))
+            (forward-line 1))))
+    (gnosis-dashboard)))
 
 (defun gnosis-dashboard-history (&optional history)
   "Display review HISTORY."
@@ -963,13 +1061,11 @@ When called with a prefix, unsuspend all themata of deck."
   ;; Navigate
   "n" #'gnosis-dashboard-menu-nodes
   "t" #'gnosis-dashboard-menu-themata
-  "D" #'gnosis-dashboard-output-decks
   ;; Sort (override tabulated-list-sort with fast version)
   "S" #'gnosis-tl-sort
   ;; Actions
   "r" #'gnosis-review
   "a" #'gnosis-add-thema
-  "d" #'gnosis-add-deck
   "SPC" #'gnosis-dashboard-search-thema
   "q" #'quit-window)
 
@@ -1036,18 +1132,11 @@ When called with a prefix, unsuspend all themata of deck."
       (let ((ov (make-overlay (point-min) (point-max))))
         (overlay-put ov 'face 'highlight)
         (overlay-put ov 'gnosis-mark t))
-      ;; Set selected IDs
-      (setq gnosis-dashboard--selected-ids gnosis-dashboard-thema-ids)
-      (message "Marked %d items" (count-lines (point-min) (point-max))))))
+      ;; Set selected IDs from all entries
+      (setq gnosis-dashboard--selected-ids
+            (mapcar #'car tabulated-list-entries))
+      (message "Marked %d items" (length gnosis-dashboard--selected-ids)))))
 
-(defun gnosis-dashboard-marked-delete ()
-  "Delete marked thema entries."
-  (interactive)
-  (when (y-or-n-p "Delete selected themata?")
-    (cl-loop for thema in gnosis-dashboard--selected-ids
-	     do (gnosis-delete-thema thema t))
-    (gnosis-dashboard--remove-entries gnosis-dashboard--selected-ids)
-    (setq gnosis-dashboard--selected-ids nil)))
 
 (defun gnosis-dashboard-bulk-link ()
   "Bulk link string in marked or all displayed themata."
@@ -1056,13 +1145,38 @@ When called with a prefix, unsuspend all themata of deck."
                   gnosis-dashboard-themata-current-ids))
          (_ (unless ids (user-error "No themata to link")))
          (string (read-string "String to replace: "))
-         (nodes (org-gnosis-select '[id title] 'nodes))
+         (nodes (gnosis-select '[id title] 'nodes))
          (node-title (gnosis-completing-read "Select node: " (mapcar #'cadr nodes)))
          (node-id (car (cl-find node-title nodes :key #'cadr :test #'string=)))
          (updated (gnosis-bulk-link-themata ids string node-id)))
     (when updated
       (gnosis-dashboard--update-entries updated)
       (setq gnosis-dashboard--selected-ids nil))))
+
+(defun gnosis-dashboard-modify-tags ()
+  "Add or remove tags on marked or displayed thema at point.
+Uses +tag/-tag syntax: +foo adds tag foo, -bar removes tag bar."
+  (interactive nil gnosis-dashboard-themata-mode)
+  (let* ((ids (or gnosis-dashboard--selected-ids
+                  (list (tabulated-list-get-id))))
+         (_ (unless ids (user-error "No themata to modify")))
+         (tags (gnosis-get-tags--unique))
+         (candidates (cl-loop for tag in tags
+                              nconc (list (concat "+" tag)
+                                          (concat "-" tag))))
+         (input (completing-read-multiple
+                 "Modify tags (+add -remove): " candidates))
+         (parsed (gnosis-tags--parse-filter input))
+         (add-tags (car parsed))
+         (remove-tags (cdr parsed)))
+    (when (or add-tags remove-tags)
+      (gnosis-modify-thema-tags ids add-tags remove-tags)
+      (dolist (id ids)
+        (remhash id gnosis-dashboard--entry-cache))
+      (setq gnosis-dashboard--rendered-text nil
+            gnosis-dashboard--selected-ids nil)
+      (gnosis-dashboard-return)
+      (message "Modified tags on %d themata" (length ids)))))
 
 (transient-define-suffix gnosis-dashboard-suffix-query (query)
   "Search for thema content for QUERY."
@@ -1083,7 +1197,7 @@ When called with a prefix, unsuspend all themata of deck."
     ("q" "Back" transient-quit-one)]])
 
 (defun gnosis-dashboard-themata-show-orphaned ()
-  "Show themata with orphaned links (referencing deleted org-gnosis nodes)."
+  "Show themata with orphaned links (referencing deleted nodes)."
   (interactive nil gnosis-dashboard-themata-mode)
   (let* ((orphaned-rows (gnosis--orphaned-links))
          (thema-ids (when orphaned-rows
@@ -1095,6 +1209,15 @@ When called with a prefix, unsuspend all themata of deck."
           (gnosis-dashboard-output-themata thema-ids))
       (message "No themata with orphaned links"))))
 
+(defun gnosis-dashboard-view-by-tags ()
+  "Prompt for tags and display matching themata."
+  (interactive)
+  (let* ((filter (gnosis-tags-filter-prompt))
+	 (ids (gnosis-filter-by-tags (car filter) (cdr filter))))
+    (when ids
+      (push #'gnosis-dashboard-output-tags gnosis-dashboard--view-history)
+      (gnosis-dashboard-output-themata ids))))
+
 (transient-define-prefix gnosis-dashboard-menu-themata ()
   "Transient menu for themata operations."
   [["Themata"
@@ -1103,10 +1226,8 @@ When called with a prefix, unsuspend all themata of deck."
                                    gnosis-dashboard--view-history nil)
                              (gnosis-dashboard-output-themata (gnosis-collect-thema-ids))))
     ("SPC" "Search themata" gnosis-dashboard-suffix-query)
-    ("d" "View by decks" (lambda () (interactive)
-                          (gnosis-dashboard-output-decks)))
-    ("t" "View by tags" (lambda () (interactive)
-                         (gnosis-dashboard-output-tags)))
+    ("t" "View by tags" gnosis-dashboard-view-by-tags)
+    ("T" "View all tags" gnosis-dashboard-output-tags)
     ("n" "View new" gnosis-dashboard-themata-show-new)
     ("o" "Show orphaned" gnosis-dashboard-themata-show-orphaned)
     ("q" "Back" transient-quit-one)]])
@@ -1116,20 +1237,19 @@ When called with a prefix, unsuspend all themata of deck."
   [["Navigate"
     ("n" "Nodes" gnosis-dashboard-menu-nodes)
     ("t" "Themata" gnosis-dashboard-menu-themata)
-    ("D" "Decks" (lambda () (interactive) (gnosis-dashboard-output-decks)))
     ("q" "Quit" quit-window)]
    ["Actions"
     ("r" "Review" gnosis-review)
     ("a" "Add thema" gnosis-add-thema)
-    ("d" "Add deck" gnosis-add-deck)
     ("m" "Monkeytype" gnosis-monkeytype-start)
     ("h" "History" gnosis-dashboard-history)]
    ["Import/Export"
-    ("e" "Export deck" gnosis-export-deck)
-    ("i" "Import deck" gnosis-import-deck)]
+    ("e" "Export themata" gnosis-export-themata)
+    ("i" "Import gnosis collection" gnosis-import-file)
+    ("I" "Import Anki" gnosis-import-anki)]
    ["Maintenance"
-    ("s" "Sync nodes" org-gnosis-db-sync)
-    ("S" "Rebuild nodes" (lambda () (interactive) (org-gnosis-db-sync t)))
+    ("s" "Sync nodes" gnosis-nodes-db-sync)
+    ("S" "Rebuild nodes" (lambda () (interactive) (gnosis-nodes-db-sync t)))
     ("l" "Link health" gnosis-links-check)
     ("L" "Link sync" gnosis-links-sync)
     ("c" "Rebuild cache" gnosis-dashboard-rebuild-cache)]])
@@ -1143,11 +1263,10 @@ GENERATION prevents stale updates when the user navigates away."
       (let ((inhibit-read-only t))
         (delete-region marker (point-max))
         (goto-char marker)
-        (let ((first t))
-          (dolist (module (cdr gnosis-dashboard-modules))
-            (if first
-                (setq first nil)
-              (gnosis-insert-separator))
+        (let ((modules (cdr gnosis-dashboard-modules)))
+          (funcall (symbol-value (car modules)))
+          (dolist (module (cdr modules))
+            (gnosis-insert-separator)
             (funcall (symbol-value module))))
         (goto-char (point-min))))))
 
@@ -1189,37 +1308,37 @@ Compares ENTRY1 and ENTRY2 by converting string values to numbers."
 
 (defun gnosis-dashboard-get-themata-links (node-id)
   "Return list of thema IDs that link to NODE-ID.
-Queries the gnosis database links table where dest = NODE-ID."
-  (gnosis-select 'source 'links `(= dest ,node-id) t))
+Queries the thema-links table where dest = NODE-ID."
+  (gnosis-select 'source 'thema-links `(= dest ,node-id) t))
 
 (defun gnosis-dashboard-get-backlink-ids (node-id)
   "Return list of node IDs that link to NODE-ID (backlinks)."
-  (org-gnosis-select 'source 'links `(= dest ,node-id) t))
+  (gnosis-select 'source 'node-links `(= dest ,node-id) t))
 
 (defun gnosis-dashboard-get-forward-link-ids (node-id)
   "Return list of node IDs that NODE-ID links to (forward links)."
-  (org-gnosis-select 'dest 'links `(= source ,node-id) t))
+  (gnosis-select 'dest 'node-links `(= source ,node-id) t))
 
 (defun gnosis-dashboard-nodes--data (&optional node-ids)
   "Get nodes data formatted for tabulated-list-mode.
 If NODE-IDS is provided, only get data for those nodes.
 Returns list of (ID [TITLE LINK-COUNT BACKLINK-COUNT THEMATA-LINKS-COUNT])."
-  (let* ((nodes-data (org-gnosis-get-nodes-data node-ids))
+  (let* ((nodes-data (gnosis-nodes-get-nodes-data node-ids))
 	 (all-ids (mapcar #'car nodes-data))
 	 ;; Bulk fetch forward links (1 query instead of N)
 	 (fwd-raw (if all-ids
-		      (org-gnosis-select '[source dest] 'links
-					 `(in source ,(vconcat all-ids)))
-		    (org-gnosis-select '[source dest] 'links)))
+		      (gnosis-select '[source dest] 'node-links
+				     `(in source ,(vconcat all-ids)))
+		    (gnosis-select '[source dest] 'node-links)))
 	 (fwd-hash (let ((h (make-hash-table :test 'equal)))
 		     (dolist (link fwd-raw h)
 		       (puthash (nth 0 link)
 				(1+ (or (gethash (nth 0 link) h) 0)) h))))
 	 ;; Bulk fetch themata links (1 query instead of N)
 	 (themata-raw (if all-ids
-			  (gnosis-select '[dest source] 'links
+			  (gnosis-select '[dest source] 'thema-links
 					 `(in dest ,(vconcat all-ids)))
-			(gnosis-select '[dest source] 'links)))
+			(gnosis-select '[dest source] 'thema-links)))
 	 (themata-hash (let ((h (make-hash-table :test 'equal)))
 			 (dolist (link themata-raw h)
 			   (puthash (nth 0 link)
@@ -1278,18 +1397,18 @@ DISPLAY-FN displays results, defaults to `gnosis-dashboard-output-nodes'."
   "Show isolated nodes (nodes with no connections at all).
 Isolated nodes have no backlinks, no forward links, and no themata links."
   (interactive)
-  (let* ((all-nodes-data (org-gnosis-get-nodes-data))
+  (let* ((all-nodes-data (gnosis-nodes-get-nodes-data))
 	 (all-ids (mapcar #'car all-nodes-data))
 	 ;; Bulk fetch forward links (1 query instead of N)
 	 (fwd-raw (when all-ids
-		    (org-gnosis-select '[source dest] 'links
-				       `(in source ,(vconcat all-ids)))))
+		    (gnosis-select '[source dest] 'node-links
+				   `(in source ,(vconcat all-ids)))))
 	 (fwd-set (let ((h (make-hash-table :test 'equal)))
 		    (dolist (link fwd-raw h)
 		      (puthash (nth 0 link) t h))))
 	 ;; Bulk fetch themata links (1 query instead of N)
 	 (themata-raw (when all-ids
-			(gnosis-select '[dest source] 'links
+			(gnosis-select '[dest source] 'thema-links
 				       `(in dest ,(vconcat all-ids)))))
 	 (themata-set (let ((h (make-hash-table :test 'equal)))
 			(dolist (link themata-raw h)
@@ -1314,7 +1433,7 @@ Searches the database for nodes whose titles contain the search term."
   (interactive "sSearch all nodes by title: ")
   (when (string-empty-p query)
     (user-error "Search query cannot be empty"))
-  (let* ((all-nodes (org-gnosis-select '[id title] 'nodes))
+  (let* ((all-nodes (gnosis-select '[id title] 'nodes))
          (matching-ids (cl-loop for node in all-nodes
                                for id = (nth 0 node)
                                for title = (nth 1 node)
@@ -1336,8 +1455,8 @@ Only searches within currently displayed nodes."
     (user-error "No nodes to filter"))
   (when (string-empty-p query)
     (user-error "Search query cannot be empty"))
-  (let* ((current-nodes (org-gnosis-select '[id title] 'nodes
-                                           `(in id ,(vconcat gnosis-dashboard-nodes-current-ids))))
+  (let* ((current-nodes (gnosis-select '[id title] 'nodes
+                                       `(in id ,(vconcat gnosis-dashboard-nodes-current-ids))))
          (matching-ids (cl-loop for node in current-nodes
                                for id = (nth 0 node)
                                for title = (nth 1 node)
@@ -1352,9 +1471,9 @@ Only searches within currently displayed nodes."
       (message "No nodes in current view match '%s'" query))))
 
 (defun gnosis-dashboard-nodes--search-files (query &optional node-ids)
-  "Search org files in `org-gnosis-dir' for QUERY, return matching node IDs.
+  "Search org files in `gnosis-nodes-dir' for QUERY, return matching node IDs.
 When NODE-IDS is non-nil, only search files whose node ID is in that list."
-  (let ((files (directory-files org-gnosis-dir t "^[0-9].*\\.org$"))
+  (let ((files (directory-files gnosis-nodes-dir t "\\.org\\(?:\\.gpg\\)?$"))
         (matching-ids '()))
     (dolist (file files)
       (when (file-regular-p file)
@@ -1370,7 +1489,7 @@ When NODE-IDS is non-nil, only search files whose node ID is in that list."
     (nreverse matching-ids)))
 
 (defun gnosis-dashboard-nodes-search-by-content (query)
-  "Search ALL nodes by file content in org-gnosis-dir."
+  "Search ALL nodes by file content in `gnosis-nodes-dir'."
   (interactive "sSearch all nodes by content: ")
   (when (string-empty-p query)
     (user-error "Search query cannot be empty"))
@@ -1402,11 +1521,11 @@ When NODE-IDS is non-nil, only search files whose node ID is in that list."
   "Search ALL nodes by TAG."
   (interactive
    (list (completing-read "Search nodes by tag: "
-                          (org-gnosis-select 'tag 'tags nil t)
+                          (gnosis-nodes--all-tags)
                           nil t)))
   (when (string-empty-p tag)
     (user-error "Tag cannot be empty"))
-  (let ((matching-ids (org-gnosis--nodes-by-tag tag)))
+  (let ((matching-ids (gnosis-nodes--nodes-by-tag tag)))
     (if matching-ids
         (progn
           (push (cons (tabulated-list-get-id) gnosis-dashboard-nodes-current-ids)
@@ -1418,13 +1537,13 @@ When NODE-IDS is non-nil, only search files whose node ID is in that list."
   "Filter CURRENT nodes by TAG."
   (interactive
    (list (completing-read "Filter nodes by tag: "
-                          (org-gnosis-select 'tag 'tags nil t)
+                          (gnosis-nodes--all-tags)
                           nil t)))
   (unless gnosis-dashboard-nodes-current-ids
     (user-error "No nodes to filter"))
   (when (string-empty-p tag)
     (user-error "Tag cannot be empty"))
-  (let* ((nodes-with-tag (org-gnosis--nodes-by-tag tag))
+  (let* ((nodes-with-tag (gnosis-nodes--nodes-by-tag tag))
          (matching-ids (cl-intersection gnosis-dashboard-nodes-current-ids nodes-with-tag
                                         :test #'equal)))
     (if matching-ids
@@ -1440,7 +1559,7 @@ When NODE-IDS is non-nil, only search files whose node ID is in that list."
   (let* ((due-thema-ids (gnosis-review-get-due-themata))
          (node-ids (when due-thema-ids
                      (cl-remove-duplicates
-                      (gnosis-select 'dest 'links
+                      (gnosis-select 'dest 'thema-links
                                      `(in source ,(vconcat due-thema-ids)) t)
                       :test #'equal))))
     (if node-ids
@@ -1471,8 +1590,8 @@ When NODE-IDS is non-nil, only search files whose node ID is in that list."
   "Visit the node at point."
   (interactive)
   (let* ((node-id (tabulated-list-get-id))
-         (title (car (org-gnosis-select 'title 'nodes `(= id ,node-id) t))))
-    (org-gnosis-find title)))
+         (title (car (gnosis-select 'title 'nodes `(= id ,node-id) t))))
+    (gnosis-nodes-find title)))
 
 (defun gnosis-dashboard-nodes-refresh ()
   "Refresh the current nodes view."
@@ -1568,7 +1687,7 @@ Moves cursor to the beginning of the buffer after sorting."
   :keymap gnosis-dashboard-nodes-mode-map)
 
 (defun gnosis-dashboard-output-nodes (&optional node-ids)
-  "Display org-gnosis nodes in dashboard.
+  "Display nodes in dashboard.
 If NODE-IDS is provided, display only those nodes. Otherwise display all nodes.
 Shows title, link count, backlink count, and themata links count."
   (interactive)
@@ -1576,7 +1695,6 @@ Shows title, link count, backlink count, and themata links count."
   (gnosis-dashboard-enable-mode)
   ;; Disable other dashboard modes
   (gnosis-dashboard-themata-mode -1)
-  (gnosis-dashboard-decks-mode -1)
   (gnosis-dashboard-tags-mode -1)
   ;; Enable nodes mode
   (gnosis-dashboard-nodes-mode 1)

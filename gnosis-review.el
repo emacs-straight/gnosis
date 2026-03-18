@@ -40,16 +40,15 @@
 (require 'gnosis-algorithm)
 (require 'gnosis-monkeytype)
 (require 'gnosis-utils)
-(require 'org-gnosis)
+(require 'gnosis-nodes)
+(require 'transient)
 
 ;;; Review vars
 
 (defvar gnosis-review-types '("Due themata"
-			      "Due themata of deck"
 			      "Due themata of specified tag(s)"
 			      "Overdue themata"
 			      "Due themata (Without Overdue)"
-			      "All themata of deck"
 			      "All themata of tag(s)"))
 
 (defvar gnosis-review-themata nil
@@ -148,8 +147,7 @@ If FALSE t, use gnosis-face-false face"
 (defun gnosis-display-parathema (parathema)
   "Display PARATHEMA."
   (when (and parathema (not (string-empty-p parathema)))
-    (search-backward "----") ; search back for separator
-    (forward-line 1)
+    (goto-char (point-max))
     (insert "\n" (gnosis-format-string (gnosis-org-format-string parathema)) "\n")))
 
 (defun gnosis-display-next-review (id success)
@@ -179,17 +177,19 @@ If FALSE t, use gnosis-face-false face"
 ;;; Link view mode
 
 (defun gnosis-get-linked-nodes (id)
-  "Return the title of linked org-gnosis node(s) for thema ID."
-  (let* ((links (gnosis-select 'dest 'links `(= source ,id) t))
-	 (org-gnosis-nodes (cl-loop for node-id in links
-				    collect (org-gnosis-select 'title 'nodes `(= id ,node-id) t))))
-    (and links (apply #'append org-gnosis-nodes))))
+  "Return the title of linked node(s) for thema ID."
+  (let ((links (gnosis-select 'dest 'thema-links `(= source ,id) t)))
+    (when links
+      (mapcar #'car
+	      (gnosis-sqlite-select-batch (gnosis--ensure-db)
+		"SELECT title FROM nodes WHERE id IN (%s)"
+		links)))))
 
 (defun gnosis-view-linked-node (id)
   "Visit linked node(s) for thema ID."
   (let* ((node (gnosis-completing-read "Select node: " (gnosis-get-linked-nodes id) t)))
     (window-configuration-to-register :gnosis-link-view)
-    (org-gnosis-find node)
+    (gnosis-nodes-find node)
     (gnosis-link-view-mode)))
 
 (defun gnosis-link-view--exit ()
@@ -278,21 +278,30 @@ Returns a list of the form ((yyyy mm dd) (ef-increase ef-decrease ef-total))."
 	 (t-success (nth 0 log-data))
 	 (c-success (nth 1 log-data))
 	 (c-fails (nth 2 log-data))
-	 (last-interval (gnosis-algorithm-date-diff (nth 3 log-data) (nth 4 log-data)))
+	 ;; Use elapsed time (today - last-rev) instead of scheduled interval
+	 (last-interval (gnosis-algorithm-date-diff (nth 3 log-data)))
+	 (existing-next-rev (nth 4 log-data))
 	 (gnosis (gnosis-get 'gnosis 'review `(= id ,id)))
 	 ;; Custom values (compute once)
 	 (amnesia (gnosis-get-thema-amnesia id))
-	 (lethe (gnosis-get-thema-lethe id)))
+	 (lethe (gnosis-get-thema-lethe id))
+	 (computed-next-rev (gnosis-algorithm-next-interval
+			     :last-interval last-interval
+			     :gnosis-synolon (nth 2 gnosis)
+			     :success success
+			     :successful-reviews t-success
+			     :c-fails c-fails
+			     :lethe lethe
+			     :amnesia amnesia
+			     :proto (gnosis-get-thema-proto id)))
+	 ;; On success, keep the later of computed vs existing to prevent
+	 ;; early reviews from deflating intervals.
+	 (next-rev (if (and success
+			    (gnosis-algorithm--date-later-p existing-next-rev computed-next-rev))
+		       existing-next-rev
+		     computed-next-rev)))
     (list
-     (gnosis-algorithm-next-interval
-      :last-interval last-interval
-      :gnosis-synolon (nth 2 gnosis)
-      :success success
-      :successful-reviews t-success
-      :c-fails c-fails
-      :lethe lethe
-      :amnesia amnesia
-      :proto (gnosis-get-thema-proto id))
+     next-rev
      (gnosis-algorithm-next-gnosis
       :gnosis gnosis
       :success success
@@ -319,14 +328,14 @@ SUCCESS is a boolean value, t for success, nil for failure."
 	 (t-fails (nth 4 log)))
     (gnosis-review-increment-activity-log (not (> n 0)))
     ;; Single review-log UPDATE
-    (emacsql (gnosis--ensure-db)
-	     "UPDATE review_log SET last_rev = $s1, next_rev = $s2, n = $s3, c_success = $s4, c_fails = $s5, t_success = $s6, t_fails = $s7 WHERE id = $s8"
-	     (gnosis-algorithm-date) next-rev (1+ n)
-	     (if success (1+ c-success) 0)
-	     (if success 0 (1+ c-fails))
-	     (if success (1+ t-success) t-success)
-	     (if success t-fails (1+ t-fails))
-	     id)
+    (gnosis-sqlite-execute (gnosis--ensure-db)
+	     "UPDATE review_log SET last_rev = ?, next_rev = ?, n = ?, c_success = ?, c_fails = ?, t_success = ?, t_fails = ? WHERE id = ?"
+	     (list (gnosis-algorithm-date) next-rev (1+ n)
+		   (if success (1+ c-success) 0)
+		   (if success 0 (1+ c-fails))
+		   (if success (1+ t-success) t-success)
+		   (if success t-fails (1+ t-fails))
+		   id))
     ;; Single review UPDATE
     (gnosis-update 'review `(= gnosis ',gnosis-score) `(= id ,id))))
 
@@ -474,7 +483,7 @@ If NEW? is non-nil, increment new themata log by 1."
   "Delete all activity log entries."
   (interactive)
   (when (y-or-n-p "Delete all activity log?")
-    (emacsql (gnosis--ensure-db) [:delete :from activity-log])))
+    (gnosis-sqlite-execute (gnosis--ensure-db) "DELETE FROM activity_log")))
 
 ;;; Session management
 
@@ -685,37 +694,43 @@ To monkeytype only the wrong answers use `gnosis-monkeytype-answer'."
 ;;; Entry points
 
 ;;;###autoload
-(defun gnosis-review (&optional fn)
-  "Start gnosis review session.
-
-FN: Review function, defaults to `gnosis-review-session'"
-  (interactive)
+(defun gnosis-review--start (fn thema-ids &optional due-p)
+  "Start review with FN for THEMA-IDS.
+When DUE-P, pass it to the review function."
   (setq gnosis-due-themata-total (length (gnosis-review-get-due-themata)))
   (set-register :gnosis-pre-image nil)
-  (let ((review-type (gnosis-completing-read "Review: " gnosis-review-types))
-	(fn (or fn #'gnosis-review-session)))
-    (pcase review-type
-      ("Due themata"
-       (funcall fn (gnosis-collect-thema-ids :due t) t))
-      ("Due themata of deck"
-       (funcall fn (gnosis-collect-thema-ids :due t :deck (gnosis--get-deck-id))))
-      ("Due themata of specified tag(s)"
-       (funcall fn (gnosis-collect-thema-ids :due t :tags t)))
-      ("Overdue themata"
-       (funcall fn (gnosis-review-get-overdue-themata)))
-      ("Due themata (Without Overdue)"
-       (funcall fn (cl-set-difference (mapcar #'car (gnosis-review-get--due-themata))
-				      (gnosis-review-get-overdue-themata))))
-      ("All themata of deck"
-       (funcall fn (gnosis-collect-thema-ids :deck (gnosis--get-deck-id))))
-      ("All themata of tag(s)"
-       (funcall fn (gnosis-collect-thema-ids :tags t))))))
+  (if due-p
+      (funcall fn thema-ids t)
+    (funcall fn thema-ids)))
+
+(transient-define-prefix gnosis-review ()
+  "Start gnosis review session."
+  [["Review"
+    ("d" "Due themata" (lambda () (interactive)
+			 (gnosis-review--start #'gnosis-review-session
+					       (gnosis-collect-thema-ids :due t) t)))
+    ("t" "Due themata of tag(s)" (lambda () (interactive)
+				   (gnosis-review--start #'gnosis-review-session
+							 (gnosis-collect-thema-ids :due t :tags t))))
+    ("o" "Overdue themata" (lambda () (interactive)
+			     (gnosis-review--start #'gnosis-review-session
+						   (gnosis-review-get-overdue-themata))))
+    ("w" "Due without overdue" (lambda () (interactive)
+				 (gnosis-review--start #'gnosis-review-session
+						       (cl-set-difference
+							(mapcar #'car (gnosis-review-get--due-themata))
+							(gnosis-review-get-overdue-themata)))))
+    ("T" "All themata of tag(s)" (lambda () (interactive)
+				   (gnosis-review--start #'gnosis-review-session
+							 (gnosis-collect-thema-ids :tags t))))
+    ("n" "Review node" gnosis-review-topic)
+    ("q" "Quit" transient-quit-one)]])
 
 (defun gnosis-review--select-topic ()
-  "Prompt for topic from org-gnosis database and return it's id."
+  "Prompt for topic and return its id."
   (let* ((topic-title (gnosis-completing-read "Select topic: "
-					      (org-gnosis-select 'title 'nodes)))
-	 (topic-id (caar (org-gnosis-select 'id 'nodes `(= title ,topic-title)))))
+					      (gnosis-select 'title 'nodes nil t)))
+	 (topic-id (caar (gnosis-select 'id 'nodes `(= title ,topic-title)))))
     topic-id))
 
 (defun gnosis-collect-nodes-at-depth (node-id &optional fwd-depth back-depth)
@@ -734,11 +749,11 @@ Returns a deduplicated list including NODE-ID itself."
 	(let* ((qvec (vconcat queue))
 	       (neighbors (append
 			   (when (< level fwd-depth)
-			     (org-gnosis-select 'dest 'links
-						`(in source ,qvec) t))
+			     (gnosis-select 'dest 'node-links
+					    `(in source ,qvec) t))
 			   (when (< level back-depth)
-			     (org-gnosis-select 'source 'links
-						`(in dest ,qvec) t))))
+			     (gnosis-select 'source 'node-links
+					    `(in dest ,qvec) t))))
 	       (next-queue nil))
 	  (dolist (neighbor neighbors)
 	    (unless (gethash neighbor visited)
@@ -759,24 +774,24 @@ With prefix arg, prompt for depths."
   (let* ((node-id (or node-id (gnosis-review--select-topic)))
 	 (fwd-depth (or fwd-depth 0))
 	 (back-depth (or back-depth 0))
-	 (node-title (car (org-gnosis-select 'title 'nodes
-					     `(= id ,node-id) t)))
+	 (node-title (car (gnosis-select 'title 'nodes
+					 `(= id ,node-id) t)))
 	 (node-ids (if (or (> fwd-depth 0) (> back-depth 0))
 		       (gnosis-collect-nodes-at-depth
 			node-id fwd-depth back-depth)
 		     (list node-id)))
-	 (gnosis-questions (gnosis-select 'source 'links
+	 (gnosis-questions (gnosis-select 'source 'thema-links
 					  `(in dest ,(vconcat node-ids)) t)))
-    (if (and gnosis-questions
-	     (y-or-n-p
-	      (format "Review %s thema(s) for '%s'%s?"
-		      (length gnosis-questions) node-title
-		      (if (> (length node-ids) 1)
-			  (format " (%d nodes, fwd:%d back:%d)"
-				  (length node-ids) fwd-depth back-depth)
-			""))))
-	(gnosis-review-session gnosis-questions)
-      (message "No thema found for %s (id:%s)" node-title node-id))))
+    (if (null gnosis-questions)
+	(message "No thema found for %s (id:%s)" node-title node-id)
+      (when (y-or-n-p
+	     (format "Review %s thema(s) for '%s'%s?"
+		     (length gnosis-questions) node-title
+		     (if (> (length node-ids) 1)
+			 (format " (%d nodes, fwd:%d back:%d)"
+				 (length node-ids) fwd-depth back-depth)
+		       "")))
+	(gnosis-review-session gnosis-questions)))))
 
 (provide 'gnosis-review)
 ;;; gnosis-review.el ends here

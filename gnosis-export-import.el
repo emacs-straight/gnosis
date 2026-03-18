@@ -21,16 +21,13 @@
 
 ;;; Commentary:
 
-;; Export and import operations for gnosis decks and themata.
+;; Export and import operations for gnosis themata.
 ;;
 ;; This module handles:
-;; - Exporting decks to org-mode files (`gnosis-export-deck',
-;;   `gnosis-export-deck-async')
-;; - Importing decks from org-mode files (`gnosis-import-deck',
-;;   `gnosis-import-deck-async')
-;; - Parsing exported org buffers (`gnosis-export-parse-themata',
-;;   `gnosis-export-parse--deck-name')
-;; - Saving edited themata (`gnosis-save', `gnosis-save-deck')
+;; - Exporting themata to org-mode files (`gnosis-export-themata-to-file')
+;; - Importing themata from org-mode files (`gnosis-import-file')
+;; - Parsing exported org buffers (`gnosis-export-parse-themata')
+;; - Saving edited themata (`gnosis-save')
 
 ;;; Code:
 
@@ -79,16 +76,6 @@ EXAMPLE: Boolean value, if non-nil do not add properties for thema."
       (gnosis-export--insert-read-only (car comp))
       (insert "\n" (or (cdr comp) "") "\n\n"))))
 
-(defun gnosis-export-parse--deck-name (&optional parsed-data)
-  "Retrieve deck name from PARSED-DATA."
-  (let* ((parsed-data (or parsed-data (org-element-parse-buffer)))
-	 (title (org-element-map parsed-data 'keyword
-		  (lambda (kw)
-		    (when (string= (org-element-property :key kw) "DECK")
-                      (org-element-property :value kw)))
-		  nil t)))
-    title))
-
 (defun gnosis-export-parse-themata (&optional separator)
   "Extract content for each level-2 heading for thema headings with a GNOSIS_ID.
 
@@ -132,7 +119,7 @@ Split content of Hypothesis and Answer headings using SEPARATOR."
       nil nil)
     results))
 
-(defun gnosis-export-themata (ids &optional new-p)
+(defun gnosis-export--insert-themata (ids &optional new-p)
   "Export themata for IDS.
 
 If NEW-P replace the ids of themata with NEW, used for new themata to
@@ -144,9 +131,10 @@ generate new thema id."
                            ids)))
     ;; Process each thema
     (dolist (id id-values)
-      (let ((thema-data (append (gnosis-select '[type keimenon hypothesis answer tags]
+      (let ((thema-data (append (gnosis-select '[type keimenon hypothesis answer]
                                               'themata `(= id ,id) t)
-                               (gnosis-select 'parathema 'extras `(= id ,id) t))))
+                               (gnosis-select 'parathema 'extras `(= id ,id) t)))
+            (tags (gnosis-select 'tag 'thema-tag `(= thema-id ,id) t)))
         (gnosis-export--insert-thema
          (if new-p "NEW" (number-to-string id))
          (nth 0 thema-data)
@@ -155,25 +143,28 @@ generate new thema id."
                  (mapconcat 'identity (nth 2 thema-data) gnosis-export-separator))
          (concat (string-remove-prefix "\n" gnosis-export-separator)
                  (mapconcat 'identity (nth 3 thema-data) gnosis-export-separator))
-         (nth 5 thema-data)
-         (nth 4 thema-data))))))
+         (nth 4 thema-data)
+         tags)))))
 
-;;; Deck export helpers
+;;; Export helpers
 
-(defun gnosis-export--fetch-deck-data (deck include-suspended)
-  "Fetch and prepare export data for DECK.
+(defun gnosis-export--fetch-themata-data (thema-ids include-suspended)
+  "Fetch and prepare export data for THEMA-IDS.
 When INCLUDE-SUSPENDED is nil, filter out suspended themata.
-Returns (ALL-THEMATA . EXTRAS-HT)."
-  (let* ((all-themata (emacsql (gnosis--ensure-db)
-                       [:select [id type keimenon hypothesis answer tags]
-                        :from themata :where (= deck-id $s1)] deck))
+Returns (ALL-THEMATA EXTRAS-HT TAGS-HT)."
+  (let* ((db (gnosis--ensure-db))
+         (all-themata (if thema-ids
+                          (gnosis-sqlite-select-batch db
+                            "SELECT id, type, keimenon, hypothesis, answer FROM themata WHERE id IN (%s)"
+                            thema-ids)
+			(gnosis-sqlite-select db
+			  "SELECT id, type, keimenon, hypothesis, answer FROM themata")))
          (all-ids (mapcar #'car all-themata))
          (suspended-ids (when (and all-ids (not include-suspended))
                           (mapcar #'car
-                                  (emacsql (gnosis--ensure-db)
-                                   [:select id :from review-log
-                                    :where (and (in id $v1) (= suspend 1))]
-                                   (vconcat all-ids)))))
+                            (gnosis-sqlite-select-batch db
+                              "SELECT id FROM review_log WHERE id IN (%s) AND suspend = 1"
+                              all-ids))))
          (all-themata (if suspended-ids
                           (cl-remove-if (lambda (row)
                                           (member (car row) suspended-ids))
@@ -181,17 +172,25 @@ Returns (ALL-THEMATA . EXTRAS-HT)."
                         all-themata))
          (all-ids (mapcar #'car all-themata))
          (all-extras (when all-ids
-                       (emacsql (gnosis--ensure-db)
-                        [:select [id parathema] :from extras
-                         :where (in id $v1)] (vconcat all-ids))))
+                       (gnosis-sqlite-select-batch db
+                         "SELECT id, parathema FROM extras WHERE id IN (%s)"
+                         all-ids)))
          (extras-ht (let ((ht (make-hash-table :test 'equal :size (length all-ids))))
                       (dolist (row all-extras ht)
-                        (puthash (car row) (cadr row) ht)))))
-    (cons all-themata extras-ht)))
+                        (puthash (car row) (cadr row) ht))))
+	 (all-tags (when all-ids
+                     (gnosis-sqlite-select-batch db
+                       "SELECT thema_id, tag FROM thema_tag WHERE thema_id IN (%s)"
+                       all-ids)))
+	 (tags-ht (let ((ht (make-hash-table :test 'equal :size (length all-ids))))
+		    (dolist (row all-tags ht)
+		      (push (cadr row) (gethash (car row) ht))))))
+    (list all-themata extras-ht tags-ht)))
 
-(defun gnosis-export--insert-row (row extras-ht new-p)
+(defun gnosis-export--insert-row (row extras-ht tags-ht new-p)
   "Insert a single thema ROW into the current buffer.
-EXTRAS-HT maps thema IDs to parathema.  When NEW-P, use \"NEW\" as ID."
+EXTRAS-HT maps thema IDs to parathema.  TAGS-HT maps thema IDs to
+tag lists.  When NEW-P, use \"NEW\" as ID."
   (let* ((id (nth 0 row))
          (sep-prefix (string-remove-prefix "\n" gnosis-export-separator)))
     (gnosis-export--insert-thema
@@ -200,105 +199,127 @@ EXTRAS-HT maps thema IDs to parathema.  When NEW-P, use \"NEW\" as ID."
      (concat sep-prefix (mapconcat #'identity (nth 3 row) gnosis-export-separator))
      (concat sep-prefix (mapconcat #'identity (nth 4 row) gnosis-export-separator))
      (gethash id extras-ht "")
-     (nth 5 row))))
+     (gethash id tags-ht))))
 
-(defun gnosis-export--prepare-buffer (deck-name filename)
-  "Prepare export buffer for DECK-NAME, resolving FILENAME.
+(defun gnosis-export--prepare-buffer (name filename)
+  "Prepare export buffer for NAME, resolving FILENAME.
 Returns (BUFFER . FILENAME)."
   (let ((filename (if (file-directory-p filename)
-                      (expand-file-name deck-name filename)
+                      (expand-file-name name filename)
                     filename)))
     (unless (string-match-p "\\.org$" filename)
-      (setq filename (concat (or filename deck-name) ".org")))
-    (let ((buffer (get-buffer-create (format "EXPORT: %s" deck-name))))
+      (setq filename (concat (or filename name) ".org")))
+    (let ((buffer (get-buffer-create (format "EXPORT: %s" name))))
       (with-current-buffer buffer
         (let ((inhibit-read-only t))
           (buffer-disable-undo)
           (org-mode)
-          (erase-buffer)
-          (insert (format "#+DECK: %s\n" deck-name))))
+          (erase-buffer)))
       (cons buffer filename))))
 
-;;; Deck export commands
+;;; Export commands
 
-(defun gnosis-export-deck (&optional deck filename new-p include-suspended)
-  "Export contents of DECK to FILENAME.
+(defvar gnosis-nodes-dir)
+
+(defun gnosis-export--collect-linked-node-files (thema-ids)
+  "Return list of (ID FILE) pairs for nodes linked from THEMA-IDS."
+  (when thema-ids
+    (gnosis-sqlite-select-batch (gnosis--ensure-db)
+      "SELECT DISTINCT n.id, n.file FROM nodes n \
+INNER JOIN thema_links tl ON n.id = tl.dest \
+WHERE tl.source IN (%s)"
+      thema-ids)))
+
+(defun gnosis-export--copy-node-files (node-rows directory)
+  "Copy node files from NODE-ROWS to DIRECTORY/nodes/.
+NODE-ROWS is a list of (ID FILE) pairs.  Returns count of copied files."
+  (let ((nodes-dir (expand-file-name "nodes" directory))
+	(count 0))
+    (make-directory nodes-dir t)
+    (dolist (row node-rows)
+      (let* ((file (cadr row))
+	     (src (expand-file-name file gnosis-nodes-dir))
+	     (dest (expand-file-name file nodes-dir)))
+	(when (file-exists-p src)
+	  (copy-file src dest t)
+	  (cl-incf count))))
+    count))
+
+;;;###autoload
+(defun gnosis-export-themata (directory &optional new-p include-suspended
+					include-tags exclude-tags)
+  "Export filtered themata to DIRECTORY with linked node files.
+
+When called interactively, prompts for tag filters using +/-
+notation.  INCLUDE-TAGS and EXCLUDE-TAGS can be passed directly
+for programmatic use.
+When NEW-P, replace thema IDs with NEW for fresh import.
+When INCLUDE-SUSPENDED, also export suspended themata."
+  (interactive
+   (let ((filter (gnosis-tags-filter-prompt)))
+     (list (read-directory-name "Export to directory: ")
+	   (not (y-or-n-p "Export with current thema ids? "))
+	   (y-or-n-p "Include suspended themata? ")
+	   (car filter) (cdr filter))))
+  (let* ((gc-cons-threshold most-positive-fixnum)
+	 (thema-ids (gnosis-filter-by-tags include-tags exclude-tags))
+	 (data (gnosis-export--fetch-themata-data thema-ids include-suspended))
+	 (all-themata (nth 0 data))
+	 (extras-ht (nth 1 data))
+	 (tags-ht (nth 2 data))
+	 (tags-str (concat
+		    (when include-tags
+		      (mapconcat (lambda (tag) (concat "+" tag)) include-tags " "))
+		    (when (and include-tags exclude-tags) " ")
+		    (when exclude-tags
+		      (mapconcat (lambda (tag) (concat "-" tag)) exclude-tags " ")))))
+    (make-directory directory t)
+    (let ((filename (expand-file-name "themata.org" directory))
+	  (inhibit-read-only t))
+      (with-temp-file filename
+	(insert (format "#+TAGS: %s\n" tags-str))
+	(insert (format "#+THEMATA: %d\n\n" (length all-themata)))
+	(dolist (row all-themata)
+	  (gnosis-export--insert-row row extras-ht tags-ht new-p))))
+    ;; Copy linked node files
+    (let* ((exported-ids (mapcar #'car all-themata))
+	   (node-rows (gnosis-export--collect-linked-node-files exported-ids))
+	   (node-count (if node-rows
+			   (gnosis-export--copy-node-files node-rows directory)
+			 0)))
+      (message "Exported %d themata and %d nodes to %s"
+	       (length all-themata) node-count directory))))
+
+;;;###autoload
+(defun gnosis-export-themata-to-file (&optional filename new-p include-suspended)
+  "Export all non-suspended themata to FILENAME.
 
 When NEW-P, replace thema IDs with NEW for fresh import.
 When INCLUDE-SUSPENDED, also export suspended themata."
-  (interactive (list (gnosis--get-deck-id)
-                     (read-file-name "Export to file: ")
+  (interactive (list (read-file-name "Export to file: ")
 		     (not (y-or-n-p "Export with current thema ids? "))
 		     (y-or-n-p "Include suspended themata? ")))
   (let* ((gc-cons-threshold most-positive-fixnum)
-         (deck-name (gnosis--get-deck-name deck))
-         (prepared (gnosis-export--prepare-buffer deck-name filename))
+         (prepared (gnosis-export--prepare-buffer "gnosis-export" filename))
          (buffer (car prepared))
          (filename (cdr prepared))
-         (data (gnosis-export--fetch-deck-data deck include-suspended))
-         (all-themata (car data))
-         (extras-ht (cdr data)))
+         (data (gnosis-export--fetch-themata-data nil include-suspended))
+         (all-themata (nth 0 data))
+         (extras-ht (nth 1 data))
+	 (tags-ht (nth 2 data)))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
         (insert (format "#+THEMATA: %d\n\n" (length all-themata)))
         (dolist (row all-themata)
-          (gnosis-export--insert-row row extras-ht new-p))
+          (gnosis-export--insert-row row extras-ht tags-ht new-p))
         (when filename
           (write-file filename)
-          (message "Exported deck to %s" filename))))))
-
-(defun gnosis-export-deck-async (&optional deck filename new-p include-suspended
-                                           chunk-size)
-  "Export contents of DECK to FILENAME asynchronously.
-
-Like `gnosis-export-deck' but uses `run-with-timer' between chunks
-so Emacs stays responsive during large exports.  CHUNK-SIZE controls
-how many themata to insert per batch (default 500).
-
-When NEW-P, replace thema IDs with NEW for fresh import.
-When INCLUDE-SUSPENDED, also export suspended themata."
-  (interactive (list (gnosis--get-deck-id)
-                     (read-file-name "Export to file: ")
-                     (not (y-or-n-p "Export with current thema ids? "))
-                     (y-or-n-p "Include suspended themata? ")))
-  (let* ((gc-cons-threshold most-positive-fixnum)
-         (chunk-size (or chunk-size 500))
-         (deck-name (gnosis--get-deck-name deck))
-         (prepared (gnosis-export--prepare-buffer deck-name filename))
-         (buffer (car prepared))
-         (filename (cdr prepared))
-         (data (gnosis-export--fetch-deck-data deck include-suspended))
-         (all-themata (car data))
-         (extras-ht (cdr data))
-         (total (length all-themata)))
-    (with-current-buffer buffer
-      (let ((inhibit-read-only t))
-        (insert (format "#+THEMATA: %d\n\n" total))
-        (message "Exporting %d themata..." total)
-        (cl-labels
-            ((process-next (remaining exported)
-               (if (null remaining)
-                   (when filename
-                     (with-current-buffer buffer
-                       (write-file filename))
-                     (message "Exported deck to %s" filename))
-                 (let ((count 0))
-                   (with-current-buffer buffer
-                     (let ((inhibit-read-only t))
-                       (while (and remaining (< count chunk-size))
-                         (gnosis-export--insert-row (car remaining) extras-ht new-p)
-                         (setq remaining (cdr remaining))
-                         (cl-incf count))))
-                   (let ((new-exported (+ exported count)))
-                     (message "Exporting... %d/%d themata" new-exported total)
-                     (run-with-timer 0.01 nil
-                                     #'process-next remaining new-exported))))))
-          (process-next all-themata 0))))))
+          (message "Exported %d themata to %s" (length all-themata) filename))))))
 
 ;;; Save/import
 
-(defun gnosis-save-thema (thema deck)
-  "Save THEMA for DECK.
+(defun gnosis-save-thema (thema)
+  "Save THEMA.
 Returns nil on success, or an error message string on failure."
   (let* ((id (nth 0 thema))
 	 (type (nth 1 thema))
@@ -316,7 +337,7 @@ Returns nil on success, or an error message string on failure."
 					  gnosis-thema-types)))))
     (condition-case err
         (progn
-          (funcall thema-func id deck type keimenon hypothesis
+          (funcall thema-func id type keimenon hypothesis
 	           answer parathema tags 0 links)
           nil)
       (error (format "Line %s (id:%s): %s" (or line "?") id
@@ -327,15 +348,14 @@ Returns nil on success, or an error message string on failure."
   (interactive nil gnosis-edit-mode)
   (let* ((gc-cons-threshold most-positive-fixnum)
          (themata (gnosis-export-parse-themata))
-	 (deck (gnosis--get-deck-id (gnosis-export-parse--deck-name)))
 	 (gnosis--id-cache (let ((ht (make-hash-table :test 'equal)))
 			     (dolist (id (gnosis-select 'id 'themata nil t) ht)
 			       (puthash id t ht))))
 	 (errors nil)
 	 (edited-id (string-to-number (caar themata))))
-    (emacsql-with-transaction (gnosis--ensure-db)
+    (gnosis-sqlite-with-transaction (gnosis--ensure-db)
       (cl-loop for thema in themata
-	       for err = (gnosis-save-thema thema deck)
+	       for err = (gnosis-save-thema thema)
 	       when err do (push err errors)))
     (if errors
         (user-error "Failed to import %d thema(ta):\n%s"
@@ -344,45 +364,26 @@ Returns nil on success, or an error message string on failure."
       (run-hook-with-args 'gnosis-save-hook edited-id))))
 
 ;;;###autoload
-(defun gnosis-save-deck (deck-name)
-  "Save themata for deck with DECK-NAME.
-
-If a deck with DECK-NAME already exists, prompt for confirmation
-before importing into it."
-  (interactive
-   (progn
-     (unless (eq major-mode 'org-mode)
-       (user-error "This function can only be used in org-mode buffers"))
-     (list (read-string "Deck name: " (gnosis-export-parse--deck-name)))))
-  (when (and (gnosis-get 'id 'decks `(= name ,deck-name))
-	     (not (y-or-n-p (format "Deck '%s' already exists.  Import into it? "
-				    deck-name))))
-    (user-error "Aborted"))
+(defun gnosis-import-file (file)
+  "Import gnosis themata from FILE."
+  (interactive "fFile: ")
   (let* ((gc-cons-threshold most-positive-fixnum)
-         (themata (gnosis-export-parse-themata))
-	 (deck (gnosis-get-deck-id deck-name))
 	 (gnosis--id-cache (let ((ht (make-hash-table :test 'equal)))
 			     (dolist (id (gnosis-select 'id 'themata nil t) ht)
 			       (puthash id t ht))))
-	 (errors nil))
-    (emacsql-with-transaction (gnosis--ensure-db)
+	 (errors nil)
+	 (themata (with-temp-buffer
+		    (insert-file-contents file)
+		    (org-mode)
+		    (gnosis-export-parse-themata))))
+    (gnosis-sqlite-with-transaction (gnosis--ensure-db)
       (cl-loop for thema in themata
-	       for err = (gnosis-save-thema thema deck)
+	       for err = (gnosis-save-thema thema)
 	       when err do (push err errors)))
     (if errors
         (user-error "Failed to import %d thema(ta):\n%s"
                     (length errors) (mapconcat #'identity (nreverse errors) "\n"))
-      (message "Imported %d themata for deck '%s'" (length themata) deck-name))))
-
-;;;###autoload
-(defun gnosis-import-deck (file)
-  "Save gnosis deck from FILE."
-  (interactive "fFile: ")
-  (let ((gc-cons-threshold most-positive-fixnum))
-    (with-temp-buffer
-      (insert-file-contents file)
-      (org-mode)
-      (gnosis-save-deck (gnosis-export-parse--deck-name)))))
+      (message "Imported %d themata from %s" (length themata) file))))
 
 (defun gnosis--import-split-chunks (text chunk-size)
   "Split org TEXT into chunks of CHUNK-SIZE themata.
@@ -407,28 +408,27 @@ Return a list of strings, each containing up to CHUNK-SIZE
                do (push (substring text beg end) chunks))
       (nreverse chunks))))
 
-(defun gnosis--import-chunk (header chunk deck-id id-cache)
+(defun gnosis--import-chunk (chunk id-cache)
   "Import a single CHUNK of org text.
 
-HEADER is the #+DECK line to prepend.  DECK-ID is the resolved
-deck id.  ID-CACHE is the shared `gnosis--id-cache' hash table.
+ID-CACHE is the shared `gnosis--id-cache' hash table.
 Returns a list of error strings (nil on full success)."
   (let ((gc-cons-threshold most-positive-fixnum)
         (gnosis--id-cache id-cache)
         (errors nil))
     (with-temp-buffer
-      (insert header "\n" chunk)
+      (insert chunk)
       (org-mode)
       (let ((themata (gnosis-export-parse-themata)))
-        (emacsql-with-transaction (gnosis--ensure-db)
+        (gnosis-sqlite-with-transaction (gnosis--ensure-db)
           (cl-loop for thema in themata
-                   for err = (gnosis-save-thema thema deck-id)
+                   for err = (gnosis-save-thema thema)
                    when err do (push err errors)))))
     (nreverse errors)))
 
 ;;;###autoload
-(defun gnosis-import-deck-async (file &optional chunk-size)
-  "Import gnosis deck from FILE asynchronously in chunks.
+(defun gnosis-import-file-async (file &optional chunk-size)
+  "Import gnosis themata from FILE asynchronously in chunks.
 
 CHUNK-SIZE controls how many themata to process per batch
 \(default 500).  Uses `run-with-timer' between chunks so Emacs
@@ -438,20 +438,6 @@ stays responsive.  Progress is reported in the echo area."
          (text (with-temp-buffer
                  (insert-file-contents file)
                  (buffer-string)))
-         ;; Extract header (everything before first `* Thema')
-         (header-end (or (string-match "^\\* Thema" text) 0))
-         (header (string-trim-right (substring text 0 header-end)))
-         (deck-name (with-temp-buffer
-                      (insert header)
-                      (org-mode)
-                      (gnosis-export-parse--deck-name)))
-         (deck-id (progn
-                    (when (and (gnosis-get 'id 'decks `(= name ,deck-name))
-                               (not (y-or-n-p
-                                     (format "Deck '%s' already exists.  Import into it? "
-                                             deck-name))))
-                      (user-error "Aborted"))
-                    (gnosis-get-deck-id deck-name)))
          (id-cache (let ((ht (make-hash-table :test 'equal)))
                      (dolist (id (gnosis-select 'id 'themata nil t) ht)
                        (puthash id t ht))))
@@ -471,10 +457,9 @@ stays responsive.  Progress is reported in the echo area."
                (if all-errors
                    (message "Import complete: %d themata, %d errors"
                             imported (length all-errors))
-                 (message "Import complete: %d themata for deck '%s'"
-                          imported deck-name))
+                 (message "Import complete: %d themata" imported))
              (let* ((chunk (car remaining))
-                    (errors (gnosis--import-chunk header chunk deck-id id-cache))
+                    (errors (gnosis--import-chunk chunk id-cache))
                     ;; Count headings in this chunk
                     (n (with-temp-buffer
                          (insert chunk)

@@ -1,2 +1,2 @@
-;; Generated package description from gnosis.el  -*- no-byte-compile: t; lexical-binding:t -*-
-(define-package "gnosis" "0.8.0.0.20260304.151947" "Knowledge System" '((emacs "27.2") (emacsql "4.1.0") (compat "29.1.4.2") (transient "0.7.2") (org-gnosis "0.2.0")) :commit "f90e0ddabb1ecf6b6a3a1a9e762b1ce2af56c1e5" :authors '(("Thanos Apollo" . "public@thanosapollo.org")) :maintainer '("Thanos Apollo" . "public@thanosapollo.org") :keywords '("extensions") :url "https://thanosapollo.org/projects/gnosis")
+;; Generated package description from gnosis.el  -*- mode: lisp-data; no-byte-compile: t; lexical-binding:t -*-
+(define-package "gnosis" "0.9.0.0.20260316.52136" "Knowledge System" '((emacs "29.1") (compat "29.1.4.2")) :commit "27d7370e9006c8cadd186df3e253f8fe33f6081e" :authors '(("Thanos Apollo" . "public@thanosapollo.org")) :maintainer '("Thanos Apollo" . "public@thanosapollo.org") :keywords '("extensions") :url "https://thanosapollo.org/projects/gnosis")

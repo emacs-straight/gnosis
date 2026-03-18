@@ -31,6 +31,7 @@
 
 (require 'cl-lib)
 (require 'calendar)
+(require 'time-date)
 
 (defcustom gnosis-algorithm-proto '(0 1 2)
   "Gnosis proto interval for the first successful reviews.
@@ -107,6 +108,14 @@ A value of 0.1 means +/- 10%%.  Set to 0 to disable."
   :group 'gnosis
   :type 'float)
 
+(defcustom gnosis-algorithm-day-start-hour 3
+  "Hour at which a new review day begins (0-23).
+When set to 0, days start at midnight (default).
+When set to e.g. 6, reviews done between 00:00 and 05:59
+count as the previous calendar day."
+  :group 'gnosis
+  :type 'integer)
+
 (defun gnosis-algorithm-round-items (list)
   "Round all items in LIST to 2 decimal places."
   (cl-loop for item in list
@@ -125,16 +134,23 @@ intervals less than 2."
 
 (defun gnosis-algorithm-date (&optional offset)
   "Return the current date in a list (year month day).
-Optional integer OFFSET is a number of days from the current date."
+Optional integer OFFSET is a number of days from the current date.
+
+Respects `gnosis-algorithm-day-start-hour': when set to e.g. 6,
+times before 06:00 count as the previous calendar day."
   (cl-assert (or (integerp offset) (null offset)) nil "Date offset must be an integer or nil")
-  (let* ((base-time (current-time))
-         (target-time (if offset
-                          (time-add base-time (days-to-time offset))
-                        base-time))
-         (decoded-time (decode-time target-time)))
-    (list (decoded-time-year decoded-time)
-          (decoded-time-month decoded-time)
-          (decoded-time-day decoded-time))))
+  (cl-assert (<= 0 gnosis-algorithm-day-start-hour 23) nil
+             "gnosis-algorithm-day-start-hour must be 0-23, got %d" gnosis-algorithm-day-start-hour)
+  (let* ((shifted (time-subtract (current-time)
+                                 (seconds-to-time
+                                  (* gnosis-algorithm-day-start-hour 3600))))
+         (decoded-time (decode-time shifted))
+         (target (if (and offset (not (zerop offset)))
+                     (decoded-time-add decoded-time (make-decoded-time :day offset))
+                   decoded-time)))
+    (list (decoded-time-year target)
+          (decoded-time-month target)
+          (decoded-time-day target))))
 
 (defun gnosis-algorithm-date-diff (date &optional date2)
   "Find the difference between DATE2 and DATE.
@@ -143,8 +159,10 @@ If DATE2 is nil, current date will be used instead.
 
 DATE format must be given as (year month day)."
   (let* ((given-date (encode-time 0 0 0 (caddr date) (cadr date) (car date)))
-	 (date2 (if date2 (encode-time 0 0 0 (caddr date2) (cadr date2) (car date2))
-		  (current-time)))
+	 (date2 (if date2
+		    (encode-time 0 0 0 (caddr date2) (cadr date2) (car date2))
+		  (let ((today (gnosis-algorithm-date)))
+		    (encode-time 0 0 0 (caddr today) (cadr today) (car today)))))
 	 (diff (- (time-to-days date2)
 		  (time-to-days given-date))))
     (if (>= diff 0) diff (error "`DATE2' must be higher than `DATE'"))))
@@ -238,6 +256,12 @@ LETHE: Upon having C-FAILS >= lethe, set next interval to 0."
 				;; higher than success and at least 0
 			        (max (min success-interval failure-interval) 0)))))))
     (gnosis-algorithm-date (round (gnosis-algorithm-fuzz-interval interval)))))
+
+(defun gnosis-algorithm--date-later-p (date1 date2)
+  "Return non-nil if DATE1 is later than DATE2.
+Both dates are lists of (year month day)."
+  (> (time-to-days (encode-time 0 0 0 (caddr date1) (cadr date1) (car date1)))
+     (time-to-days (encode-time 0 0 0 (caddr date2) (cadr date2) (car date2)))))
 
 
 (provide 'gnosis-algorithm)
