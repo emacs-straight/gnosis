@@ -56,25 +56,27 @@ When nil, filenames use just the title (e.g. \"my_title.org\")."
   :type 'boolean)
 
 (defcustom gnosis-nodes-templates
-  '(("Empty" (lambda () ""))
-    ("Annotated" (lambda ()
-		   (concat "{*} Summary\n\n"
-			   "{*} Notes\n\n"
-			   "{*} References\n")))
-    ("Reading" (lambda ()
-		 (let ((author (read-string "Author: ")))
-		   (concat "{*} Key Ideas\n\n"
-			   "{*} Quotes\n\n"
-			   "{*} Notes\n"
-			   (unless (string-empty-p author)
-			     (format "\nAuthor: %s\n" author)))))))
+  (list (cons "Empty" (lambda () ""))
+        (cons "Annotated"
+              (lambda ()
+                (concat "{*} Summary\n\n"
+                        "{*} Notes\n\n"
+                        "{*} References\n")))
+        (cons "Reading"
+              (lambda ()
+                (let ((author (read-string "Author: ")))
+                  (concat "{*} Key Ideas\n\n"
+                          "{*} Quotes\n\n"
+                          "{*} Notes\n"
+                          (unless (string-empty-p author)
+                            (format "\nAuthor: %s\n" author)))))))
   "Templates for nodes.
 Template functions return strings.  Use \"{*}\" as a heading
 placeholder; it will be expanded to org heading stars relative to
 the insertion context.  \"{**}\" adds one extra level, \"{***}\"
 adds two, etc."
-  :type '(repeat (cons (string :tag "Name")
-                       (function :tag "Template Function"))))
+  :type '(alist :key-type (string :tag "Name")
+                :value-type (function :tag "Template Function")))
 
 (defcustom gnosis-nodes-completing-read-func #'org-completing-read
   "Function to use for `completing-read' in node operations."
@@ -92,10 +94,11 @@ Optional argument FLATTEN, when non-nil, flattens the result.
 Delegates to `gnosis-select' (unified DB)."
   (gnosis-select value table restrictions flatten))
 
-(defun gnosis-nodes--insert-into (table values)
+(defun gnosis-nodes--insert-into (table values &optional or-ignore)
   "Insert VALUES to TABLE.
-Delegates to `gnosis--insert-into' (unified DB)."
-  (gnosis--insert-into table values))
+Delegates to `gnosis--insert-into' (unified DB).
+When OR-IGNORE, skip rows that violate UNIQUE constraints."
+  (gnosis--insert-into table values or-ignore))
 
 (defun gnosis-nodes--delete (table value)
   "From TABLE use where to delete VALUE.
@@ -145,16 +148,16 @@ If JOURNAL is non-nil, update file as a journal entry."
 			     ,(prin1-to-string tags) ,mtime ,hash]))
 			;; Insert tags
 			(cl-loop for tag in tags
-				 do (gnosis-nodes--insert-into 'node-tag `([,id ,tag])))
+				 do (gnosis-nodes--insert-into 'node-tag `([,id ,tag]) t))
 			;; Insert master relationship as link (nodes only)
 			(when (and (not journal)
 				   (plist-get item :master)
 				   (stringp (plist-get item :master)))
-			  (gnosis-nodes--insert-into 'node-links `([,id ,(plist-get item :master)])))))
+			  (gnosis-nodes--insert-into 'node-links `([,id ,(plist-get item :master)]) t))))
 	  ;; Insert ID links (nodes only)
 	  (unless journal
 	    (cl-loop for link in links
-		     do (gnosis-nodes--insert-into 'node-links `[,(cdr link) ,(car link)])))))
+		     do (gnosis-nodes--insert-into 'node-links `[,(cdr link) ,(car link)] t)))))
     (file-error
      (message "File error updating %s: %s.  Try M-x gnosis-nodes-db-force-sync to rebuild database."
               file (error-message-string err)))
@@ -338,10 +341,12 @@ The caller expands markers via `gnosis-org-expand-headings'.
          (template (if (= (length templates) 1)
                        (cdar templates)
                      (cdr (assoc
-			   (funcall gnosis-nodes-completing-read-func "Select template:"
+			   (funcall gnosis-nodes-completing-read-func "Select template: "
                                     (mapcar #'car templates))
                            templates)))))
-    (funcall (apply #'append template))))
+    (unless (functionp template)
+      (user-error "Template is not a valid function; check `gnosis-nodes-templates' or `gnosis-journal-templates'"))
+    (funcall template)))
 
 ;;;###autoload
 (defun gnosis-nodes-insert-template ()
@@ -375,22 +380,53 @@ If JOURNAL-P is non-nil, retrieve/create node as a journal entry."
     (org-insert-link nil (format "id:%s" id) desc)
     (unless id (message "Created new node: %s" node))))
 
-(defun gnosis-nodes-insert-filetag (&optional tag)
-  "Insert TAG as filetag."
-  (interactive)
-  (let* ((filetags (gnosis-nodes--all-tags))
-         (tag (or tag (funcall gnosis-nodes-completing-read-func "Select tag: " filetags))))
+(defun gnosis-nodes--last-keyword-pos ()
+  "Return end-of-line position of the last #+KEYWORD line at buffer top.
+Returns nil if no keyword lines exist."
+  (save-excursion
+    (goto-char (point-min))
+    (let (last-pos)
+      (while (looking-at "^#\\+")
+        (setq last-pos (line-end-position))
+        (forward-line 1))
+      last-pos)))
+
+(defun gnosis-nodes--filetags ()
+  "Return list of current filetags, or nil."
+  (let ((case-fold-search t))
     (save-excursion
-      (if (org-at-heading-p)
-	  (org-set-tags tag)
-	(goto-char (point-min))
-	(if (re-search-forward "^#\\+FILETAGS:" nil t)
-            (progn
-              (end-of-line)
-              (insert (if (looking-back ":" nil) "" ":") tag ":"))
-          (progn
-            (insert "#+FILETAGS: :" tag ":")
-            (newline)))))))
+      (goto-char (point-min))
+      (when (re-search-forward "^#\\+filetags:[ \t]*\\(.*\\)" nil t)
+        (split-string (match-string 1) ":" t)))))
+
+(defun gnosis-nodes--write-filetags (tags)
+  "Write TAGS as a #+filetags line, replacing or creating it."
+  (let ((case-fold-search t)
+        (value (format " :%s:" (mapconcat #'identity tags ":"))))
+    (save-excursion
+      (goto-char (point-min))
+      (cond
+       ((re-search-forward "^#\\+filetags:" nil t)
+        (delete-region (point) (line-end-position))
+        (insert value))
+       ((gnosis-nodes--last-keyword-pos)
+        (goto-char (gnosis-nodes--last-keyword-pos))
+        (end-of-line)
+        (insert "\n#+filetags:" value))
+       (t
+        (insert "#+filetags:" value "\n"))))))
+
+(defun gnosis-nodes-insert-filetag (&optional tag)
+  "Insert TAG as filetag.
+At a heading, add TAG to heading tags.  Otherwise, add to #+FILETAGS."
+  (interactive)
+  (let ((tag (or tag (funcall gnosis-nodes-completing-read-func
+                              "Select tag: " (gnosis-nodes--all-tags)))))
+    (if (org-at-heading-p)
+        (org-set-tags (cl-union (list tag) (org-get-tags nil t) :test #'string=))
+      (let ((existing (gnosis-nodes--filetags)))
+        (unless (member tag existing)
+          (gnosis-nodes--write-filetags (append existing (list tag))))))))
 
 ;;;###autoload
 (defun gnosis-nodes-insert-tags (tags)
@@ -399,10 +435,11 @@ If JOURNAL-P is non-nil, retrieve/create node as a journal entry."
    (list (completing-read-multiple
 	  "Select tags (separated by ,): "
 	  (gnosis-nodes--all-tags))))
-  (let ((id (gnosis-org-get-id)))
+  (let ((id (gnosis-org-get-id))
+	(org-id-track-globally nil))
     (org-id-goto id)
     (if (org-current-level)
-	(org-set-tags tags)
+	(org-set-tags (cl-union tags (org-get-tags nil t) :test #'string=))
       (dolist (tag tags)
 	(gnosis-nodes-insert-filetag tag)))))
 
@@ -549,7 +586,8 @@ When FORCE (prefix arg), rebuild from scratch."
 
 (defvar-keymap gnosis-nodes-mode-map
   :doc "gnosis-nodes keymap"
-  "C-c C-o" #'gnosis-nodes-goto-id)
+  "C-c C-o" #'gnosis-nodes-goto-id
+  "C-c C-q" #'gnosis-nodes-insert-tags)
 
 (define-minor-mode gnosis-nodes-mode
   "Gnosis nodes mode."

@@ -703,30 +703,33 @@ File: gnosis.info,  Node: gnosis-nodes-templates,  Next: The {*} Heading Marker,
 3.5.1 ‘gnosis-nodes-templates’
 ------------------------------
 
-This variable is a list of ‘(NAME FUNCTION)’ pairs.  Each function takes
-no arguments and returns a string that is inserted into the new file
-after the initial ‘#+title:’ and ‘#+filetags:’ lines.
+This variable is an alist of ‘(NAME . FUNCTION)’ cons cells.  Each
+function takes no arguments and returns a string that is inserted into
+the new file after the initial ‘#+title:’ and ‘#+filetags:’ lines.
 
-   The default templates are:
+   You can use named functions or inline lambdas.  When using inline
+lambdas, build the list with ‘list’ and ‘cons’ so the lambdas are
+compiled under lexical-binding (a quoted ‘'(...)’ form leaves lambdas as
+inert data):
 
-   • *Empty*: no content.
-   • *Annotated*: sections for Summary, Notes, and References.
-   • *Reading*: sections for Key Ideas, Quotes, and Notes, with an
-     optional Author field.
+     ;; Using named functions (recommended):
+     (defun my/annotated-template ()
+       (concat "{*} Summary\n\n"
+               "{*} Notes\n\n"
+               "{*} References\n"))
 
      (setopt gnosis-nodes-templates
-             '(("Empty" (lambda () ""))
-               ("Annotated" (lambda ()
-                              (concat "{*} Summary\n\n"
-                                      "{*} Notes\n\n"
-                                      "{*} References\n")))
-               ("Reading" (lambda ()
-                            (let ((author (read-string "Author: ")))
-                              (concat "{*} Key Ideas\n\n"
-                                      "{*} Quotes\n\n"
-                                      "{*} Notes\n"
-                                      (unless (string-empty-p author)
-                                        (format "\nAuthor: %s\n" author))))))))
+             '(("Empty" . ignore)
+               ("Annotated" . my/annotated-template)))
+
+     ;; Using inline lambdas (note `list' / `cons'):
+     (setopt gnosis-nodes-templates
+             (list (cons "Empty" (lambda () ""))
+                   (cons "Annotated"
+                         (lambda ()
+                           (concat "{*} Summary\n\n"
+                                   "{*} Notes\n\n"
+                                   "{*} References\n")))))
 
 
 File: gnosis.info,  Node: The {*} Heading Marker,  Next: Inserting a Template Manually,  Prev: gnosis-nodes-templates,  Up: Templates
@@ -1013,11 +1016,12 @@ File: gnosis.info,  Node: gnosis-journal-templates,  Up: Templates (1)
 --------------------------------
 
      (setopt gnosis-journal-templates
-             '(("Default" (lambda ()
-                            (concat "{*} Daily Notes\n\n"
-                                    "{*} Goals\n"
-                                    (gnosis-journal-todos))))
-               ("Empty" (lambda () ""))))
+             (list (cons "Default"
+                         (lambda ()
+                           (concat "{*} Daily Notes\n\n"
+                                   "{*} Goals\n"
+                                   (gnosis-journal-todos))))
+                   (cons "Empty" (lambda () ""))))
 
    The default template calls ‘gnosis-journal-todos’, which produces a
 checkbox list of any TODO items from ‘gnosis-journal-todo-files’ that
@@ -1135,11 +1139,12 @@ File: gnosis.info,  Node: Full Journal Configuration Example,  Prev: Inserting J
        (gnosis-journal-todo-files org-agenda-files)
        (gnosis-journal-todo-keywords org-todo-keywords)
        (gnosis-journal-templates
-        '(("Default" (lambda ()
-                       (concat "{*} Daily Notes\n\n"
-                               "{*} Goals\n"
-                               (gnosis-journal-todos))))
-          ("Empty" (lambda () "")))))
+        (list (cons "Default"
+                    (lambda ()
+                      (concat "{*} Daily Notes\n\n"
+                              "{*} Goals\n"
+                              (gnosis-journal-todos))))
+              (cons "Empty" (lambda () "")))))
 
 
 File: gnosis.info,  Node: Themata (Spaced Repetition Cards),  Next: Review System,  Prev: Journal,  Up: Top
@@ -2082,88 +2087,88 @@ Node: GPG Encryption19672
 Node: Displaying Tags in Completion20150
 Node: Templates20720
 Node: gnosis-nodes-templates21110
-Node: The {*} Heading Marker22414
-Node: Inserting a Template Manually23381
-Node: Automatic Sync23759
-Node: Manual Sync24190
-Node: Force Rebuild24761
-Node: Links Between Nodes25022
-Node: Backlinks25900
-Node: Tags26261
-Node: Adding Tags26743
-Node: Journal27347
-Node: Creating Entries28004
-Node: gnosis-journal28193
-Node: gnosis-journal-find28412
-Node: File vs Single-File Mode28878
-Node: Separate Files (Default)29168
-Node: Single Journal File29625
-Node: GPG Encryption (1)30226
-Node: Templates (1)30609
-Node: gnosis-journal-templates30911
-Node: ``TODO'' Integration31603
-Node: gnosis-journal-todo-files32089
-Node: gnosis-journal-todo-keywords32428
-Node: Bullet Point Character32943
-Node: How TODO Carry-Forward Works33417
-Node: Checked Item Tracking34011
-Node: Inserting Journal Links34713
-Node: Full Journal Configuration Example35123
-Node: Themata (Spaced Repetition Cards)35944
-Node: Fields of a Thema36641
-Node: Thema Types37723
-Node: Basic38036
-Node: Double38447
-Node: MCQ (Multiple Choice Question)38814
-Node: Cloze39264
-Node: MC-cloze (Multiple Choice Cloze)39930
-Node: Creating Themata40313
-Node: Editing Themata40868
-Node: Tags on Themata41302
-Node: The Link Between Themata and Nodes41965
-Node: Suspending Themata42793
-Node: Review System43167
-Node: Starting a Review Session43764
-Node: Tag Filtering44757
-Node: The Review Flow45221
-Node: Type-Specific Review Behaviour46570
-Node: Basic (1)46842
-Node: MCQ47298
-Node: Cloze (1)47597
-Node: MC-cloze48004
-Node: Node-Based Review48257
-Node: Activity Logging48896
-Node: Monkeytype49265
-Node: Sample Configuration50019
-Node: The Algorithm50375
-Node: Overview50862
-Node: The Gnosis Score Triplet51423
-Node: Proto Phase52317
-Node: Interval Calculation52793
-Node: Anagnosis Events53455
-Node: Lethe54240
-Node: Fuzz54618
-Node: Day Boundary54946
-Node: Per-Tag Algorithm Customisation55773
-Node: All Algorithm Variables57059
-Node: Dashboard58480
-Node: Opening the Dashboard58881
-Node: The Themata View59306
-Node: The Nodes View59872
-Node: The Tags View60789
-Node: Export and Import61118
-Node: Exporting to a Directory61553
-Node: Tag Filter Notation62389
-Node: Programmatic Use62777
-Node: Exporting to a Single File63118
-Node: The Export Format63442
-Node: Importing a File64042
-Node: Asynchronous Import64384
-Node: Link Health and Maintenance64697
-Node: Checking Link Health65248
-Node: Full Synchronisation65493
-Node: Syncing the Node Database65842
-Node: Backup Recommendations66279
+Node: The {*} Heading Marker22412
+Node: Inserting a Template Manually23379
+Node: Automatic Sync23757
+Node: Manual Sync24188
+Node: Force Rebuild24759
+Node: Links Between Nodes25020
+Node: Backlinks25898
+Node: Tags26259
+Node: Adding Tags26741
+Node: Journal27345
+Node: Creating Entries28002
+Node: gnosis-journal28191
+Node: gnosis-journal-find28410
+Node: File vs Single-File Mode28876
+Node: Separate Files (Default)29166
+Node: Single Journal File29623
+Node: GPG Encryption (1)30224
+Node: Templates (1)30607
+Node: gnosis-journal-templates30909
+Node: ``TODO'' Integration31641
+Node: gnosis-journal-todo-files32127
+Node: gnosis-journal-todo-keywords32466
+Node: Bullet Point Character32981
+Node: How TODO Carry-Forward Works33455
+Node: Checked Item Tracking34049
+Node: Inserting Journal Links34751
+Node: Full Journal Configuration Example35161
+Node: Themata (Spaced Repetition Cards)36017
+Node: Fields of a Thema36714
+Node: Thema Types37796
+Node: Basic38109
+Node: Double38520
+Node: MCQ (Multiple Choice Question)38887
+Node: Cloze39337
+Node: MC-cloze (Multiple Choice Cloze)40003
+Node: Creating Themata40386
+Node: Editing Themata40941
+Node: Tags on Themata41375
+Node: The Link Between Themata and Nodes42038
+Node: Suspending Themata42866
+Node: Review System43240
+Node: Starting a Review Session43837
+Node: Tag Filtering44830
+Node: The Review Flow45294
+Node: Type-Specific Review Behaviour46643
+Node: Basic (1)46915
+Node: MCQ47371
+Node: Cloze (1)47670
+Node: MC-cloze48077
+Node: Node-Based Review48330
+Node: Activity Logging48969
+Node: Monkeytype49338
+Node: Sample Configuration50092
+Node: The Algorithm50448
+Node: Overview50935
+Node: The Gnosis Score Triplet51496
+Node: Proto Phase52390
+Node: Interval Calculation52866
+Node: Anagnosis Events53528
+Node: Lethe54313
+Node: Fuzz54691
+Node: Day Boundary55019
+Node: Per-Tag Algorithm Customisation55846
+Node: All Algorithm Variables57132
+Node: Dashboard58553
+Node: Opening the Dashboard58954
+Node: The Themata View59379
+Node: The Nodes View59945
+Node: The Tags View60862
+Node: Export and Import61191
+Node: Exporting to a Directory61626
+Node: Tag Filter Notation62462
+Node: Programmatic Use62850
+Node: Exporting to a Single File63191
+Node: The Export Format63515
+Node: Importing a File64115
+Node: Asynchronous Import64457
+Node: Link Health and Maintenance64770
+Node: Checking Link Health65321
+Node: Full Synchronisation65566
+Node: Syncing the Node Database65915
+Node: Backup Recommendations66352
 
 End Tag Table
 
