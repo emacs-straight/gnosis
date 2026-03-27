@@ -133,12 +133,8 @@ Each entry is a function to restore that view
 
 (defvar gnosis-dashboard-module-today-stats
   (lambda ()
-    (let* ((due (gnosis-review-get--due-themata))
-           (due-count (length due))
-           (today (gnosis-algorithm-date))
-           (overdue-count (cl-count-if-not
-                           (lambda (thema) (equal (cadr thema) today))
-                           due)))
+    (let* ((due-count (length (gnosis-review-get--due-themata)))
+           (overdue-count (gnosis-review-count-overdue)))
       (insert
        (gnosis-center-string
         (format "\nReviewed today: %s (New: %s)"
@@ -206,15 +202,15 @@ Safe to call multiple times; always rebuilds from the base header."
 
 (defun gnosis-dashboard--streak (dates)
   "Return current review streak number as a string.
-DATES: Dates in the activity log, a list of dates in (YYYY MM DD)."
-  (let ((date-set (make-hash-table :test 'equal))
+DATES: Dates in the activity log, a list of YYYYMMDD integers."
+  (let ((date-set (make-hash-table :test 'eql))
         (count 0))
     (dolist (d dates)
       (puthash d t date-set))
     (cl-loop for i from -1 downto -9999
-             while (gethash (gnosis-algorithm-date i) date-set)
+             while (gethash (gnosis--date-to-int (gnosis-algorithm-date i)) date-set)
              do (cl-incf count))
-    (when (gethash (gnosis-algorithm-date) date-set)
+    (when (gethash (gnosis--today-int) date-set)
       (cl-incf count))
     (number-to-string count)))
 
@@ -1039,12 +1035,13 @@ Translates {n}, {n,}, {n,m} to \\{n\\}, \\{n,\\}, \\{n,m\\}."
       (setq tabulated-list-sort-key (cons "Date" t))
       (setq tabulated-list-entries
             (cl-loop for entry in history
+                     for date = (gnosis--int-to-date (car entry))
                      collect (list (car entry)
                                    (vector (propertize
 					    (format "%04d/%02d/%02d"
-						    (nth 0 (car entry))
-						    (nth 1 (car entry))
-						    (nth 2 (car entry)))
+						    (nth 0 date)
+						    (nth 1 date)
+						    (nth 2 date))
 					    'face 'org-date)
                                            (number-to-string (cadr entry))
                                            (number-to-string (caddr entry))))))
@@ -1244,8 +1241,8 @@ Uses +tag/-tag syntax: +foo adds tag foo, -bar removes tag bar."
     ("m" "Monkeytype" gnosis-monkeytype-start)
     ("h" "History" gnosis-dashboard-history)]
    ["Import/Export"
-    ("e" "Export themata" gnosis-export-themata)
-    ("i" "Import gnosis collection" gnosis-import-file)
+    ("e" "Export themata" gnosis-export-db)
+    ("i" "Import themata" gnosis-import-db)
     ("I" "Import Anki" gnosis-import-anki)]
    ["Maintenance"
     ("s" "Sync nodes" gnosis-nodes-db-sync)

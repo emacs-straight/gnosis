@@ -183,23 +183,29 @@ Dashboard
 
 Export and Import
 
-* Exporting to a Directory::
-* Exporting to a Single File::
+* Exporting::
+* Importing::
 * The Export Format::
-* Importing a File::
-* Asynchronous Import::
+* Editing Themata (Org Format)::
+* Importing from Anki::
 
-Exporting to a Directory
+Exporting
 
 * Tag Filter Notation::
 * Programmatic Use::
+
+Importing from Anki
+
+* What Gets Imported::
+* What Does Not Transfer::
+* Requirements: Requirements (1).
 
 Link Health and Maintenance
 
 * Checking Link Health::
 * Full Synchronisation::
 * Syncing the Node Database::
-* Backup Recommendations::
+* Version Control: Version Control (1).
 
 
 File: gnosis.info,  Node: Introduction,  Next: Installation and Setup,  Prev: Top,  Up: Top
@@ -1375,7 +1381,8 @@ presents several review modes:
    • *Due themata*: All due and new themata, looping until none remain.
    • *Due themata of tag(s)*: Due themata filtered by +include/-exclude
      tags.
-   • *Overdue themata*: Only themata whose scheduled date has passed.
+   • *Overdue themata*: Only themata whose scheduled date has passed
+     (excludes never-reviewed themata).
    • *Due without overdue*: Today's due themata, excluding overdue ones.
    • *All themata of tag(s)*: All themata for selected tags, ignoring
      due status.
@@ -1433,6 +1440,9 @@ stages:
 
   6. *Algorithm update*: After the user confirms the result, the review
      log and gnosis score are updated.
+
+   During a session, the header line shows the current progress as
+‘Reviewed: N/Total’.
 
 
 File: gnosis.info,  Node: Type-Specific Review Behaviour,  Next: Node-Based Review,  Prev: The Review Flow,  Up: Review System
@@ -1625,7 +1635,9 @@ standard algorithm applies:
      (setq gnosis-algorithm-proto '(0 1 2))
 
    After exhausting the proto list, the algorithm switches to the
-standard ‘synolon * elapsed-time’ calculation.
+standard ‘synolon * elapsed-time’ calculation.  Failing a review during
+the proto phase always resets the interval to 0 (due again today),
+regardless of elapsed time.
 
 
 File: gnosis.info,  Node: Interval Calculation,  Next: Anagnosis Events,  Prev: Proto Phase,  Up: The Algorithm
@@ -1801,7 +1813,8 @@ File: gnosis.info,  Node: Opening the Dashboard,  Next: The Themata View,  Up: D
    This opens the ‘*Gnosis Dashboard*’ buffer with a header showing your
 review streak and today's statistics.  A transient menu opens
 automatically, providing access to nodes, themata, review sessions,
-export/import, and database synchronisation.
+export/import (‘e’ to export, ‘i’ to import), and database
+synchronisation.
 
 
 File: gnosis.info,  Node: The Themata View,  Next: The Nodes View,  Prev: Opening the Dashboard,  Up: Dashboard
@@ -1857,44 +1870,35 @@ File: gnosis.info,  Node: Export and Import,  Next: Link Health and Maintenance,
 9 Export and Import
 *******************
 
-Gnosis provides two export commands and two import commands.  Exports
-produce standard org-mode files that can be edited freely and
-re-imported.
+Gnosis exports and imports themata using SQLite database files
+(‘.gnosis’ extension).  This is faster and more reliable than text-based
+formats, especially for large collections.
 
 * Menu:
 
-* Exporting to a Directory::
-* Exporting to a Single File::
+* Exporting::
+* Importing::
 * The Export Format::
-* Importing a File::
-* Asynchronous Import::
+* Editing Themata (Org Format)::
+* Importing from Anki::
 
 
-File: gnosis.info,  Node: Exporting to a Directory,  Next: Exporting to a Single File,  Up: Export and Import
+File: gnosis.info,  Node: Exporting,  Next: Importing,  Up: Export and Import
 
-9.1 Exporting to a Directory
-============================
+9.1 Exporting
+=============
 
-‘gnosis-export-themata’ is the primary export command.  It writes a
-filtered subset of your themata to a directory, creating a ‘themata.org’
-file and copying linked node files into a ‘nodes/’ subdirectory.
-
-     M-x gnosis-export-themata
+     M-x gnosis-export-db
 
    When called interactively, you are asked for:
 
   1. Tag filters using +/- notation.
-  2. Which directory to export to.
-  3. Whether to replace IDs with ‘NEW’ (for sharing).
-  4. Whether to include suspended themata.
+  2. The output file path (defaults to ‘gnosis-export.gnosis’).
+  3. Whether to include suspended themata.
 
-   The resulting directory structure:
-
-     export-directory/
-       themata.org
-       nodes/
-         note1.org
-         note2.org
+   The export uses ‘ATTACH DATABASE’ to write directly from your main
+database to the export file, making it efficient even for large
+collections.
 
 * Menu:
 
@@ -1902,7 +1906,7 @@ file and copying linked node files into a ‘nodes/’ subdirectory.
 * Programmatic Use::
 
 
-File: gnosis.info,  Node: Tag Filter Notation,  Next: Programmatic Use,  Up: Exporting to a Directory
+File: gnosis.info,  Node: Tag Filter Notation,  Next: Programmatic Use,  Up: Exporting
 
 9.1.1 Tag Filter Notation
 -------------------------
@@ -1915,72 +1919,123 @@ Each candidate is prefixed with ‘+’ (include) or ‘-’ (exclude):
 and applies only exclusions.
 
 
-File: gnosis.info,  Node: Programmatic Use,  Prev: Tag Filter Notation,  Up: Exporting to a Directory
+File: gnosis.info,  Node: Programmatic Use,  Prev: Tag Filter Notation,  Up: Exporting
 
 9.1.2 Programmatic Use
 ----------------------
 
-Pass tag lists directly:
-
-     (gnosis-export-themata "/path/to/backup/"
-                            nil nil
-                            '("greek")
-                            '("draft"))
+     (gnosis-export-db "~/backups/greek.gnosis"
+                       '("greek") '("draft"))
 
 
-File: gnosis.info,  Node: Exporting to a Single File,  Next: The Export Format,  Prev: Exporting to a Directory,  Up: Export and Import
+File: gnosis.info,  Node: Importing,  Next: The Export Format,  Prev: Exporting,  Up: Export and Import
 
-9.2 Exporting to a Single File
-==============================
+9.2 Importing
+=============
 
-‘gnosis-export-themata-to-file’ exports all non-suspended themata to a
-single org file without copying linked nodes.
+     M-x gnosis-import-db
+
+   Opens a diff review buffer showing NEW and CHANGED entries before
+applying any changes.  From this buffer:
+
+   • ‘RET’: View detailed field-by-field comparison for the entry at
+     point.
+   • ‘a’: Apply all changes (inserts new themata, updates changed ones).
+   • ‘q’: Quit without applying.
+   • ‘?’ / ‘h’: Open the transient help menu.
+
+   New themata receive initialised review state (due immediately).
+Changed themata have their content and tags updated without affecting
+review history.  After applying, the database is committed to Git.
 
 
-File: gnosis.info,  Node: The Export Format,  Next: Importing a File,  Prev: Exporting to a Single File,  Up: Export and Import
+File: gnosis.info,  Node: The Export Format,  Next: Editing Themata (Org Format),  Prev: Importing,  Up: Export and Import
 
 9.3 The Export Format
 =====================
 
-Each thema is a top-level org heading:
+The ‘.gnosis’ file is a plain SQLite database with four tables:
+‘themata’, ‘thema_tag’, ‘extras’, and ‘gnosis_meta’.  Values use emacsql
+encoding (Lisp values serialized with ‘prin1-to-string’).
 
-     * Thema :greek:vocabulary:
-     :PROPERTIES:
-     :GNOSIS_ID: 12345678
-     :GNOSIS_TYPE: Basic
-     :END:
-     ** Keimenon
-     What is the Greek word for knowledge?
-
-     ** Answer
-     - gnosis
-
-     ** Parathema
-     Additional context.
-
-   The separator between multiple items in Hypothesis and Answer is the
-value of ‘gnosis-export-separator’ (default: ‘"\n- "’).
+   See ‘docs/import-guide.org’ for the full schema and instructions on
+creating import databases programmatically.
 
 
-File: gnosis.info,  Node: Importing a File,  Next: Asynchronous Import,  Prev: The Export Format,  Up: Export and Import
+File: gnosis.info,  Node: Editing Themata (Org Format),  Next: Importing from Anki,  Prev: The Export Format,  Up: Export and Import
 
-9.4 Importing a File
-====================
+9.4 Editing Themata (Org Format)
+================================
 
-     M-x gnosis-import-file
-
-   Reads an exported org file and inserts or updates themata within a
-single transaction.  Themata with ‘:GNOSIS_ID: NEW’ receive fresh IDs.
+The org-based format is still used for the ‘*Gnosis Edit*’ buffer when
+editing individual themata (‘M-x gnosis-edit-thema’ or ‘e’ during
+review).  The ‘:GNOSIS_TYPE:’ property is editable; the type is
+validated on save against ‘gnosis-thema-types’.
 
 
-File: gnosis.info,  Node: Asynchronous Import,  Prev: Importing a File,  Up: Export and Import
+File: gnosis.info,  Node: Importing from Anki,  Prev: Editing Themata (Org Format),  Up: Export and Import
 
-9.5 Asynchronous Import
+9.5 Importing from Anki
 =======================
 
-For large files, use ‘M-x gnosis-import-file-async’.  This splits the
-file into chunks and processes them with timers between batches, keeping
-Emacs responsive.
+Gnosis can import Anki collections and decks directly:
+
+     M-x gnosis-import-anki
+
+   The command auto-detects the file format by extension:
+
+   • ‘.apkg’: Anki deck package (extracted via ‘7z’, including modern
+     zstd-compressed ‘.anki21b’ format)
+   • ‘.anki2’ / ‘.anki21’: Anki collection database (opened directly)
+
+   Supported note types:
+
+   • *Basic* (and reversed): Imported as gnosis basic themata.
+   • *Cloze*: Anki ‘{{c1::answer::hint}}’ syntax is converted to gnosis
+     cloze themata.  Each cloze group becomes a separate thema.
+
+   Image occlusion notes are skipped.
+
+* Menu:
+
+* What Gets Imported::
+* What Does Not Transfer::
+* Requirements: Requirements (1).
+
+
+File: gnosis.info,  Node: What Gets Imported,  Next: What Does Not Transfer,  Up: Importing from Anki
+
+9.5.1 What Gets Imported
+------------------------
+
+   • Question and answer fields (HTML converted to org-mode markup)
+   • Tags (Anki hierarchical tags like ‘anatomy::upper_limb’ are split
+     into individual tags: ‘anatomy’, ‘upper_limb’)
+   • Parathema from extra fields (if the note model has more than 2
+     fields)
+
+
+File: gnosis.info,  Node: What Does Not Transfer,  Next: Requirements (1),  Prev: What Gets Imported,  Up: Importing from Anki
+
+9.5.2 What Does Not Transfer
+----------------------------
+
+Review history, scheduling data, and deck organisation are not imported.
+All imported themata start fresh with default algorithm values and are
+due immediately.
+
+
+File: gnosis.info,  Node: Requirements (1),  Prev: What Does Not Transfer,  Up: Importing from Anki
+
+9.5.3 Requirements
+------------------
+
+   • ‘7z’ (p7zip) for ‘.apkg’ extraction
+   • ‘zstd’ (optional, for modern ‘.anki21b’ format; ‘7z’ can also
+     handle it)
+
+   The import runs asynchronously in chunks of 200, keeping Emacs
+responsive during large imports.
 
 
 File: gnosis.info,  Node: Link Health and Maintenance,  Prev: Export and Import,  Up: Top
@@ -2000,7 +2055,7 @@ Over time, links between themata and nodes can fall out of sync:
 * Checking Link Health::
 * Full Synchronisation::
 * Syncing the Node Database::
-* Backup Recommendations::
+* Version Control: Version Control (1).
 
 
 File: gnosis.info,  Node: Checking Link Health,  Next: Full Synchronisation,  Up: Link Health and Maintenance
@@ -2024,7 +2079,7 @@ File: gnosis.info,  Node: Full Synchronisation,  Next: Syncing the Node Database
 confirmation with counts before making changes.
 
 
-File: gnosis.info,  Node: Syncing the Node Database,  Next: Backup Recommendations,  Prev: Full Synchronisation,  Up: Link Health and Maintenance
+File: gnosis.info,  Node: Syncing the Node Database,  Next: Version Control (1),  Prev: Full Synchronisation,  Up: Link Health and Maintenance
 
 10.3 Syncing the Node Database
 ==============================
@@ -2038,137 +2093,136 @@ complete rebuild:
      C-u M-x gnosis-nodes-db-sync
 
 
-File: gnosis.info,  Node: Backup Recommendations,  Prev: Syncing the Node Database,  Up: Link Health and Maintenance
+File: gnosis.info,  Node: Version Control (1),  Prev: Syncing the Node Database,  Up: Link Health and Maintenance
 
-10.4 Backup Recommendations
-===========================
+10.4 Version Control
+====================
 
-For manual backups, copy ‘gnosis.db’ before major operations.  The
-export commands produce portable org files for disaster recovery:
+Gnosis automatically commits ‘gnosis.db’ to a Git repository inside
+‘gnosis-dir’ after review sessions, migrations, and imports.  Enable
+‘gnosis-vc-auto-push’ to push to a remote after each session:
 
-     (gnosis-export-themata-to-file
-      (format "~/backups/gnosis-%s.org"
-              (format-time-string "%Y-%m-%d")))
-
-   For continuous protection, enable ‘gnosis-vc-auto-push’ to push the
-database to a remote Git repository after each review session.
+     (setq gnosis-vc-auto-push t)
 
 
 Tag Table:
 Node: Top227
-Node: Introduction3703
-Node: Why Gnosis4569
-Node: The Two Subsystems5526
-Node: Nodes5766
-Node: Themata6303
-Node: The Link Between Nodes and Themata7442
-Node: Greek Terminology Reference8087
-Node: Data Storage9768
-Node: Installation and Setup10211
-Node: Requirements10576
-Node: Installing from GNU ELPA11090
-Node: Basic Configuration11449
-Node: Key Directories12224
-Node: gnosis-dir12470
-Node: gnosis-nodes-dir12886
-Node: gnosis-journal-dir13252
-Node: Upgrading from org-gnosis13697
-Node: Version Control14103
-Node: Completing Read Integration14681
-Node: Full Example Configuration15262
-Node: Nodes (1)15774
-Node: What Makes an Org Heading a Node16576
-Node: Creating and Finding Nodes17235
-Node: gnosis-nodes-find17492
-Node: gnosis-nodes-find-by-tag18079
-Node: File Naming18434
-Node: gnosis-nodes-timestring18874
-Node: GPG Encryption19672
-Node: Displaying Tags in Completion20150
-Node: Templates20720
-Node: gnosis-nodes-templates21110
-Node: The {*} Heading Marker22412
-Node: Inserting a Template Manually23379
-Node: Automatic Sync23757
-Node: Manual Sync24188
-Node: Force Rebuild24759
-Node: Links Between Nodes25020
-Node: Backlinks25898
-Node: Tags26259
-Node: Adding Tags26741
-Node: Journal27345
-Node: Creating Entries28002
-Node: gnosis-journal28191
-Node: gnosis-journal-find28410
-Node: File vs Single-File Mode28876
-Node: Separate Files (Default)29166
-Node: Single Journal File29623
-Node: GPG Encryption (1)30224
-Node: Templates (1)30607
-Node: gnosis-journal-templates30909
-Node: ``TODO'' Integration31641
-Node: gnosis-journal-todo-files32127
-Node: gnosis-journal-todo-keywords32466
-Node: Bullet Point Character32981
-Node: How TODO Carry-Forward Works33455
-Node: Checked Item Tracking34049
-Node: Inserting Journal Links34751
-Node: Full Journal Configuration Example35161
-Node: Themata (Spaced Repetition Cards)36017
-Node: Fields of a Thema36714
-Node: Thema Types37796
-Node: Basic38109
-Node: Double38520
-Node: MCQ (Multiple Choice Question)38887
-Node: Cloze39337
-Node: MC-cloze (Multiple Choice Cloze)40003
-Node: Creating Themata40386
-Node: Editing Themata40941
-Node: Tags on Themata41375
-Node: The Link Between Themata and Nodes42038
-Node: Suspending Themata42866
-Node: Review System43240
-Node: Starting a Review Session43837
-Node: Tag Filtering44830
-Node: The Review Flow45294
-Node: Type-Specific Review Behaviour46643
-Node: Basic (1)46915
-Node: MCQ47371
-Node: Cloze (1)47670
-Node: MC-cloze48077
-Node: Node-Based Review48330
-Node: Activity Logging48969
-Node: Monkeytype49338
-Node: Sample Configuration50092
-Node: The Algorithm50448
-Node: Overview50935
-Node: The Gnosis Score Triplet51496
-Node: Proto Phase52390
-Node: Interval Calculation52866
-Node: Anagnosis Events53528
-Node: Lethe54313
-Node: Fuzz54691
-Node: Day Boundary55019
-Node: Per-Tag Algorithm Customisation55846
-Node: All Algorithm Variables57132
-Node: Dashboard58553
-Node: Opening the Dashboard58954
-Node: The Themata View59379
-Node: The Nodes View59945
-Node: The Tags View60862
-Node: Export and Import61191
-Node: Exporting to a Directory61626
-Node: Tag Filter Notation62462
-Node: Programmatic Use62850
-Node: Exporting to a Single File63191
-Node: The Export Format63515
-Node: Importing a File64115
-Node: Asynchronous Import64457
-Node: Link Health and Maintenance64770
-Node: Checking Link Health65321
-Node: Full Synchronisation65566
-Node: Syncing the Node Database65915
-Node: Backup Recommendations66352
+Node: Introduction3787
+Node: Why Gnosis4653
+Node: The Two Subsystems5610
+Node: Nodes5850
+Node: Themata6387
+Node: The Link Between Nodes and Themata7526
+Node: Greek Terminology Reference8171
+Node: Data Storage9852
+Node: Installation and Setup10295
+Node: Requirements10660
+Node: Installing from GNU ELPA11174
+Node: Basic Configuration11533
+Node: Key Directories12308
+Node: gnosis-dir12554
+Node: gnosis-nodes-dir12970
+Node: gnosis-journal-dir13336
+Node: Upgrading from org-gnosis13781
+Node: Version Control14187
+Node: Completing Read Integration14765
+Node: Full Example Configuration15346
+Node: Nodes (1)15858
+Node: What Makes an Org Heading a Node16660
+Node: Creating and Finding Nodes17319
+Node: gnosis-nodes-find17576
+Node: gnosis-nodes-find-by-tag18163
+Node: File Naming18518
+Node: gnosis-nodes-timestring18958
+Node: GPG Encryption19756
+Node: Displaying Tags in Completion20234
+Node: Templates20804
+Node: gnosis-nodes-templates21194
+Node: The {*} Heading Marker22496
+Node: Inserting a Template Manually23463
+Node: Automatic Sync23841
+Node: Manual Sync24272
+Node: Force Rebuild24843
+Node: Links Between Nodes25104
+Node: Backlinks25982
+Node: Tags26343
+Node: Adding Tags26825
+Node: Journal27429
+Node: Creating Entries28086
+Node: gnosis-journal28275
+Node: gnosis-journal-find28494
+Node: File vs Single-File Mode28960
+Node: Separate Files (Default)29250
+Node: Single Journal File29707
+Node: GPG Encryption (1)30308
+Node: Templates (1)30691
+Node: gnosis-journal-templates30993
+Node: ``TODO'' Integration31725
+Node: gnosis-journal-todo-files32211
+Node: gnosis-journal-todo-keywords32550
+Node: Bullet Point Character33065
+Node: How TODO Carry-Forward Works33539
+Node: Checked Item Tracking34133
+Node: Inserting Journal Links34835
+Node: Full Journal Configuration Example35245
+Node: Themata (Spaced Repetition Cards)36101
+Node: Fields of a Thema36798
+Node: Thema Types37880
+Node: Basic38193
+Node: Double38604
+Node: MCQ (Multiple Choice Question)38971
+Node: Cloze39421
+Node: MC-cloze (Multiple Choice Cloze)40087
+Node: Creating Themata40470
+Node: Editing Themata41025
+Node: Tags on Themata41459
+Node: The Link Between Themata and Nodes42122
+Node: Suspending Themata42950
+Node: Review System43324
+Node: Starting a Review Session43921
+Node: Tag Filtering44953
+Node: The Review Flow45417
+Node: Type-Specific Review Behaviour46859
+Node: Basic (1)47131
+Node: MCQ47587
+Node: Cloze (1)47886
+Node: MC-cloze48293
+Node: Node-Based Review48546
+Node: Activity Logging49185
+Node: Monkeytype49554
+Node: Sample Configuration50308
+Node: The Algorithm50664
+Node: Overview51151
+Node: The Gnosis Score Triplet51712
+Node: Proto Phase52606
+Node: Interval Calculation53202
+Node: Anagnosis Events53864
+Node: Lethe54649
+Node: Fuzz55027
+Node: Day Boundary55355
+Node: Per-Tag Algorithm Customisation56182
+Node: All Algorithm Variables57468
+Node: Dashboard58889
+Node: Opening the Dashboard59290
+Node: The Themata View59754
+Node: The Nodes View60320
+Node: The Tags View61237
+Node: Export and Import61566
+Node: Exporting62019
+Node: Tag Filter Notation62562
+Node: Programmatic Use62935
+Node: Importing63167
+Node: The Export Format63908
+Node: Editing Themata (Org Format)64419
+Node: Importing from Anki64892
+Node: What Gets Imported65767
+Node: What Does Not Transfer66214
+Node: Requirements (1)66565
+Node: Link Health and Maintenance66956
+Node: Checking Link Health67520
+Node: Full Synchronisation67765
+Node: Syncing the Node Database68114
+Node: Version Control (1)68548
 
 End Tag Table
 
