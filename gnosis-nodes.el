@@ -120,12 +120,20 @@ Delegates to `gnosis--delete' (unified DB)."
 
 ;;; File operations
 
-(defun gnosis-nodes--update-file (file &optional journal)
+(defun gnosis-nodes--update-file (file &optional journal buffer)
   "Add contents of FILE to database.
-If JOURNAL is non-nil, update file as a journal entry."
+If JOURNAL is non-nil, update file as a journal entry.
+When BUFFER is non-nil, parse it instead of reading FILE from disk.
+This avoids re-reading (and re-decrypting) files already open."
   (condition-case err
-      (let* ((info (gnosis-org-get-file-info file))
-	     (data (butlast info))
+      (let* ((info (if buffer
+		      (with-temp-buffer
+			(insert (with-current-buffer buffer
+				  (save-restriction (widen) (buffer-string))))
+			(gnosis-org-get-buffer-info))
+		    (gnosis-org-get-file-info file)))
+	     (hash (car (last info)))
+	     (data (butlast info 2))
 	     (table (if journal 'journal 'nodes))
 	     (filename (file-name-nondirectory file))
 	     (full-path (expand-file-name file (if journal
@@ -133,8 +141,8 @@ If JOURNAL is non-nil, update file as a journal entry."
 						 gnosis-nodes-dir)))
 	     (mtime (format-time-string "%s" (file-attribute-modification-time
 					      (file-attributes full-path))))
-	     (hash (gnosis-org--file-hash full-path))
-	     (links (and (> (length info) 1) (apply #'append (last info)))))
+	     (links (and (> (length info) 2)
+			 (car (last (butlast info))))))
 	(message "Parsing: %s" filename)
 	(gnosis-sqlite-with-transaction (gnosis--ensure-db)
 	  (cl-loop for item in data
@@ -166,7 +174,8 @@ If JOURNAL is non-nil, update file as a journal entry."
               file (error-message-string err)))))
 
 (defun gnosis-nodes--delete-file (&optional file)
-  "Delete contents for FILE in database."
+  "Delete contents for FILE in database.
+Removes node rows, associated links, and tags."
   (let* ((file (or file (file-name-nondirectory (buffer-file-name))))
 	 (filename (file-name-nondirectory file))
 	 (journal-p (file-in-directory-p file (gnosis-journal--dir)))
@@ -175,17 +184,24 @@ If JOURNAL is non-nil, update file as a journal entry."
 		  (gnosis-nodes-select 'id 'nodes `(= file ,filename) t))))
     (gnosis-sqlite-with-transaction (gnosis--ensure-db)
       (cl-loop for node in nodes
-	       do (if journal-p
-		      (gnosis-nodes--delete 'journal `(= id ,node))
-		    (gnosis-nodes--delete 'nodes `(= id ,node)))))))
+	       do (progn
+		    (if journal-p
+			(gnosis-nodes--delete 'journal `(= id ,node))
+		      (gnosis-nodes--delete 'nodes `(= id ,node)))
+		    (gnosis-nodes--delete 'node-tag `(= node-id ,node))
+		    (gnosis-nodes--delete 'node-links `(= source ,node))
+		    (gnosis-nodes--delete 'node-links `(= dest ,node)))))))
 
 (defun gnosis-nodes-update-file (&optional file)
   "Update contents of FILE in database.
-Removes all contents of FILE in database, adding them anew."
+Removes all contents of FILE in database, adding them anew.
+When FILE is the current buffer's file, parses the buffer directly
+instead of re-reading from disk (avoids re-decrypting .gpg files)."
   (let* ((file (or file (buffer-file-name)))
-	 (journal-p (file-in-directory-p file (gnosis-journal--dir))))
+	 (journal-p (file-in-directory-p file (gnosis-journal--dir)))
+	 (buf (and file (get-file-buffer file))))
     (gnosis-nodes--delete-file file)
-    (gnosis-nodes--update-file file journal-p)
+    (gnosis-nodes--update-file file journal-p buf)
     ;; Update todos
     (when (and journal-p file)
       (gnosis-journal--update-todos file))))

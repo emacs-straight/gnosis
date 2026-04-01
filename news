@@ -1,4 +1,4 @@
-                                        2026/03/26 2026/03/25 2026/03/16
+                             2026/03/31 2026/03/26 2026/03/25 2026/03/16
 
 
 ⁃ [Homepage]
@@ -13,33 +13,50 @@
 [Changelog] <https://thanosapollo.org/log/gnosis/>
 
 
-1 0.10.1
+1 0.10.2
 ════════
 
-1.1 Algorithm
+1.1 Performance
+───────────────
+
+  ⁃ Eliminate redundant GPG decryption on save for `.org.gpg' files.
+  ⁃ Git operations (add, commit, push) are now fully async.
+
+
+1.2 Other
+─────────
+
+  ⁃ `gnosis-journal-todo-keywords' defaults to `("TODO")' instead of
+    inheriting `org-todo-keywords'.
+
+
+2 0.10.1
+════════
+
+2.1 Algorithm
 ─────────────
 
   ⁃ Cap post-failure interval at 7 days to prevent overly lenient
     reschedules for mature cards.
 
 
-1.2 Bug fixes
+2.2 Bug fixes
 ─────────────
 
   ⁃ Fix `gnosis-import-db' initializing review state with wrong values,
     causing errors on first review of imported themata.
 
 
-1.3 Other
+2.3 Other
 ─────────
 
   ⁃ Demo collection shipped as `.gnosis' instead of org file.
 
 
-2 0.10.0
+3 0.10.0
 ════════
 
-2.1 Breaking changes
+3.1 Breaking changes
 ────────────────────
 
   ⁃ *Date storage migrated to integers*: review dates are now stored as
@@ -50,7 +67,7 @@
     ⁃ Old org-file exports are no longer supported.
 
 
-2.2 New features
+3.2 New features
 ────────────────
 
   ⁃ *Anki GUID-based duplicate detection*: re-importing the same deck
@@ -64,7 +81,7 @@
     commit after import.
 
 
-2.3 Performance
+3.3 Performance
 ───────────────
 
   ⁃ Due/overdue queries use integer comparison in SQL instead of Elisp
@@ -74,7 +91,7 @@
   ⁃ N+1 queries eliminated in review session and Anki model parsing.
 
 
-2.4 Bug fixes
+3.4 Bug fixes
 ─────────────
 
   ⁃ Fix proto phase failures computing amnesia-based interval instead of
@@ -85,10 +102,10 @@
     overdue.
 
 
-3 0.9.0
+4 0.9.0
 ═══════
 
-3.1 Breaking changes
+4.1 Breaking changes
 ────────────────────
 
   ⁃ *Dropped emacsql dependency*: gnosis now uses Emacs's built-in
@@ -103,7 +120,7 @@
     filtering.
 
 
-3.2 New features
+4.2 New features
 ────────────────
 
   ⁃ *Anki import*: import Anki decks or user collections directly with
@@ -128,16 +145,10 @@
     filtering and node export.
 
 
-3.3 Dashboard
+4.3 Dashboard
 ─────────────
 
   ⁃ Tags view with regex filter (`l'), regex search (`SPC'), and tag
     counts.
   ⁃ Bulk tag rename via regex pattern (`R') using a temp-table approach
-    for O(1) SQL statements regardless of batch size.
-  ⁃ Anki import keybinding in the dashboard menu.
-  ⁃ Merge case-duplicate tags (`C'): groups tags by case, keeps the
-    most-used variant as canonical.
-    ⁃ Meant to simplify imports from anki decks hierarchical tag
-      structure
   …  …

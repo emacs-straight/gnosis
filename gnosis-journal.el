@@ -66,10 +66,8 @@ adds two, etc."
   "TODO files used for the journal entries."
   :type '(repeat string))
 
-(defcustom gnosis-journal-todo-keywords org-todo-keywords
-  "TODO Keywords used for parsing `gnosis-journal-todo-files'.
-All items after the vertical bar \"|\" will be ignored, for
-compatability with `org-todo-keywords'."
+(defcustom gnosis-journal-todo-keywords '("TODO")
+  "TODO keywords used for parsing `gnosis-journal-todo-files'."
   :type '(repeat string))
 
 (defcustom gnosis-journal-bullet-point-char "+"
@@ -119,9 +117,7 @@ compatability with `org-todo-keywords'."
       (org-element-map (org-element-parse-buffer) 'headline
         (lambda (headline)
           (when (member (org-element-property :todo-keyword headline)
-			(cl-loop for keyword in gnosis-journal-todo-keywords
-				 until (and (stringp keyword) (string= keyword "|"))
-				 collect keyword))
+			gnosis-journal-todo-keywords)
             (let* ((title (org-element-property :raw-value headline))
                    (timestamp (org-element-property
 			       :raw-value (org-element-property :scheduled headline))))
@@ -208,9 +204,14 @@ ELEMENT should be the output of `org-element-parse-buffer'."
 (defun gnosis-journal--update-todos (file)
   "Update TODO items from journal FILE."
   (let* ((today (format-time-string "%Y-%m-%d"))
+         (buf (get-file-buffer file))
          (parsed-buffer (with-temp-buffer
-                          (insert-file-contents file)
-                          (org-mode)
+                          (if buf
+                              (insert (with-current-buffer buf
+                                        (save-restriction (widen) (buffer-string))))
+                            (insert-file-contents file))
+                          (unless (derived-mode-p 'org-mode)
+                            (org-mode))
                           (org-element-parse-buffer)))
          (done-todos (if (and gnosis-journal-file
                               (string= (file-name-nondirectory file)
