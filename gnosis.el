@@ -6,7 +6,7 @@
 ;; Keywords: extensions
 ;; URL: https://thanosapollo.org/projects/gnosis
 
-;; Version: 0.10.2
+;; Version: 0.10.3
 
 ;; Package-Requires: ((emacs "29.1") (compat "29.1.4.2"))
 
@@ -124,6 +124,11 @@ This is the global default used when creating new review buffers.
 When non-nil, center content during review sessions.
 When nil, content will be displayed left-aligned instead of centered."
   :type 'boolean)
+
+(defcustom gnosis-latex-preview nil
+  "When non-nil, render LaTeX fragments during review."
+  :type 'boolean
+  :group 'gnosis)
 
 (defcustom gnosis-script-input-method-alist
   '((greek . "greek")
@@ -491,12 +496,29 @@ Respects `gnosis-center-content' buffer-local setting."
         (forward-line 1)))))
 
 (defun gnosis-org-format-string (str)
-  "Return STR fontified as in `org-mode'."
+  "Return STR fontified as in `org-mode'.
+When `gnosis-latex-preview' is non-nil, render LaTeX fragments as
+images using `org-format-latex'."
   (with-temp-buffer
     (org-mode)
     (org-toggle-pretty-entities)
     (insert str)
     (font-lock-ensure)
+    (when gnosis-latex-preview
+      (condition-case err
+          (progn
+            (goto-char (point-min))
+            (org-format-latex "ltximg/org-ltximg"
+                              (point-min) (point-max) temporary-file-directory
+                              'overlays nil 'forbuffer
+                              org-preview-latex-default-process)
+            ;; Convert overlays to text properties so they survive buffer-string
+            (dolist (ov (overlays-in (point-min) (point-max)))
+              (when-let ((display (overlay-get ov 'display)))
+                (put-text-property (overlay-start ov) (overlay-end ov)
+                                   'display display)
+                (delete-overlay ov))))
+        (error (message "LaTeX preview: %s" (error-message-string err)))))
     (buffer-string)))
 
 (defun gnosis-cloze-create (str clozes &optional cloze-string)
@@ -605,8 +627,9 @@ When VERIFICATION is non-nil, skips `y-or-n-p' prompt."
 
 When `gnosis--id-cache' is bound, uses hash table lookup instead of DB query.
 
-LENGTH: length of id, default to a random number between 10-15."
-  (let* ((length (or length (+ (random 5) 10)))
+LENGTH: length of id, default to 18."
+  ;; NOTE: length must not exceed 18; 19-digit+ values can overflow sqlite.
+  (let* ((length (or length 18))
          (max-val (expt 10 length))
          (min-val (expt 10 (1- length)))
          (id (+ (random (- max-val min-val)) min-val))
@@ -624,7 +647,7 @@ LENGTH: length of id, default to a random number between 10-15."
 Uses `gnosis--id-cache' for O(1) collision checking when bound."
   (let ((ids nil) (count 0))
     (while (< count n)
-      (let* ((len (or length (+ (random 5) 10)))
+      (let* ((len (or length 18))
              (max-val (expt 10 len))
              (min-val (expt 10 (1- len)))
              (id (+ (random (- max-val min-val)) min-val))
