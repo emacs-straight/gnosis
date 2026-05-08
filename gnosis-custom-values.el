@@ -1,4 +1,4 @@
-;;; gnosis-custom-values.el --- Per-tag algorithm parameters  -*- lexical-binding: t; -*-
+;;; gnosis-custom-values.el --- Per-tag values  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2023-2026  Free Software Foundation, Inc.
 
@@ -53,14 +53,15 @@ Each entry is a list of (:tag NAME PARAMETERS) where:
 (defun gnosis-validate-custom-values (new-value)
   "Validate the structure and values of NEW-VALUE for gnosis-custom-values."
   (unless (listp new-value)
-    (error "GNOSIS-CUSTOM-VALUES should be a list of entries"))
+    (user-error "GNOSIS-CUSTOM-VALUES should be a list of entries"))
   (dolist (entry new-value)
     (unless (and (listp entry) (= (length entry) 3)
                  (eq (nth 0 entry) :tag)
                  (stringp (nth 1 entry))
                  (listp (nth 2 entry))) ; Ensure the third element is a plist
-      (error
-       "Each entry should have a :tag keyword, a string, and a plist of custom values"))
+      (user-error
+       (concat "Each entry should have a :tag keyword,"
+               " a string, and a plist of custom values")))
     (let ((proto (plist-get (nth 2 entry) :proto))
           (anagnosis (plist-get (nth 2 entry) :anagnosis))
           (epignosis (plist-get (nth 2 entry) :epignosis))
@@ -68,17 +69,19 @@ Each entry is a list of (:tag NAME PARAMETERS) where:
           (amnesia (plist-get (nth 2 entry) :amnesia))
           (lethe (plist-get (nth 2 entry) :lethe)))
       (unless (and (listp proto) (cl-every #'integerp proto))
-        (error "Proto must be a list of integer values"))
+        (user-error "Proto must be a list of integer values"))
       (unless (or (null anagnosis) (integerp anagnosis))
-        (error "Anagnosis should be an integer"))
+        (user-error "Anagnosis should be an integer"))
       (unless (or (null epignosis) (numberp epignosis))
-        (error "Epignosis should be a number"))
+        (user-error "Epignosis should be a number"))
       (unless (or (null agnoia) (numberp agnoia))
-        (error "Agnoia should be a number"))
-      (unless (or (null amnesia) (and (numberp amnesia) (<= amnesia 1) (>= amnesia 0)))
-        (error "Amnesia should be a number between 0 and 1"))
+        (user-error "Agnoia should be a number"))
+      (unless (or (null amnesia)
+                  (and (numberp amnesia)
+                       (<= amnesia 1) (>= amnesia 0)))
+        (user-error "Amnesia should be a number between 0 and 1"))
       (unless (or (null lethe) (and (integerp lethe) (> lethe 0)))
-        (error "Lethe should be an integer greater than 0")))))
+        (user-error "Lethe should be an integer greater than 0")))))
 
 (defvar gnosis--custom-values-ht nil
   "Hash table cache mapping tag strings to their custom value plists.
@@ -108,7 +111,8 @@ searches VALUES directly."
       (setq gnosis--custom-values-ht (gnosis--build-custom-values-ht)))
     (let ((plist (gethash tag gnosis--custom-values-ht)))
       (when plist
-        (gnosis-get-custom-values--validate plist gnosis-custom--valid-values))
+        (gnosis-get-custom-values--validate
+         plist gnosis-custom--valid-values))
       plist)))
 
 (defun gnosis-custom-values-watcher (symbol new-value _operation _where)
@@ -132,9 +136,12 @@ WHERE is the buffer or object where the change happens."
                   (setq ks (cons (car plist) ks))
                   (setq plist (cddr plist)))
                 ks)))
-    (let ((invalid-key (cl-find-if (lambda (key) (not (member key valid-keywords))) keys)))
+    (let ((invalid-key (cl-find-if
+                        (lambda (key)
+                          (not (member key valid-keywords)))
+                        keys)))
       (if invalid-key
-          (error "Invalid custom keyword found in: %s" invalid-key)
+          (user-error "Invalid custom keyword found in: %s" invalid-key)
         t))))
 
 (defun gnosis-get-custom-values (key search-value &optional values)
@@ -142,31 +149,43 @@ WHERE is the buffer or object where the change happens."
 
 VALUES: Defaults to `gnosis-custom-values'."
   (cl-assert (eq key :tag) nil "Key value must be :tag")
-  (cl-assert (stringp search-value) nil "Search-value must be the name of a tag as a string.")
+  (cl-assert (stringp search-value) nil
+             "Search-value must be a tag name string.")
   (let ((results)
 	(values (or values gnosis-custom-values)))
     (dolist (rule values)
       (when (and (plist-get rule key)
                  (equal (plist-get rule key) search-value))
         (setq results (append results (nth 2 rule)))))
-    (gnosis-get-custom-values--validate results gnosis-custom--valid-values)
+    (gnosis-get-custom-values--validate
+     results gnosis-custom--valid-values)
     results))
 
-(defun gnosis-get-custom-tag-values (id keyword &optional custom-tags custom-values)
+(defun gnosis-get-custom-tag-values
+    (id keyword &optional custom-tags custom-values)
   "Return KEYWORD values for thema ID.
 Uses cached hash table lookup when CUSTOM-VALUES is nil."
-  (cl-assert (keywordp keyword) nil "keyword must be a keyword!")
-  (let ((tags (if id (gnosis-select 'tag 'thema-tag `(= thema-id ,id) t) custom-tags)))
+  (cl-assert (keywordp keyword) nil
+             "keyword must be a keyword!")
+  (let ((tags (if id
+                  (gnosis-select 'tag 'thema-tag
+                                 `(= thema-id ,id) t)
+                custom-tags)))
     (cl-loop for tag in tags
-	     for val = (plist-get (gnosis--custom-values-lookup tag custom-values) keyword)
-	     when val collect val)))
+             for val = (plist-get
+                        (gnosis--custom-values-lookup
+                         tag custom-values)
+                        keyword)
+             when val collect val)))
 
-(defun gnosis--get-tag-value (id keyword aggregator &optional custom-tags custom-values)
+(defun gnosis--get-tag-value
+    (id keyword aggregator &optional custom-tags custom-values)
   "Return aggregated tag value for thema ID and KEYWORD.
 
-AGGREGATOR combines multiple tag values (e.g., #\\='max or #\\='min).
-Returns nil when no tags define KEYWORD."
-  (let ((vals (gnosis-get-custom-tag-values id keyword custom-tags custom-values)))
+AGGREGATOR combines multiple tag values (e.g., #\\='max
+or #\\='min).  Returns nil when no tags define KEYWORD."
+  (let ((vals (gnosis-get-custom-tag-values
+               id keyword custom-tags custom-values)))
     (and vals (apply aggregator vals))))
 
 (defun gnosis-get-thema-custom-value (id keyword aggregator default-var
@@ -176,10 +195,12 @@ Returns nil when no tags define KEYWORD."
 Looks up tag values (aggregated with AGGREGATOR), falling back to
 DEFAULT-VAR.
 When VALIDATE-P is non-nil, signals error if value >= 1."
-  (let* ((tag-val (gnosis--get-tag-value id keyword aggregator custom-tags custom-values))
+  (let* ((tag-val (gnosis--get-tag-value
+                   id keyword aggregator
+                   custom-tags custom-values))
          (val (or tag-val default-var)))
     (when (and validate-p (>= val 1))
-      (error "%s value must be lower than 1" keyword))
+      (user-error "%s value must be lower than 1" keyword))
     val))
 
 ;; Named wrappers -- tag variants (used in tests)
@@ -208,27 +229,35 @@ When VALIDATE-P is non-nil, signals error if value >= 1."
 
 (defun gnosis-get-thema-amnesia (id &optional custom-tags custom-values)
   "Return amnesia value for thema ID."
-  (gnosis-get-thema-custom-value id :amnesia #'max gnosis-algorithm-amnesia-value
-				 t custom-tags custom-values))
+  (gnosis-get-thema-custom-value
+   id :amnesia #'max gnosis-algorithm-amnesia-value
+   t custom-tags custom-values))
 
 (defun gnosis-get-thema-epignosis (id &optional custom-tags custom-values)
   "Return epignosis value for thema ID."
-  (gnosis-get-thema-custom-value id :epignosis #'max gnosis-algorithm-epignosis-value
-				 t custom-tags custom-values))
+  (gnosis-get-thema-custom-value
+   id :epignosis #'max gnosis-algorithm-epignosis-value
+   t custom-tags custom-values))
 
 (defun gnosis-get-thema-agnoia (id &optional custom-tags custom-values)
   "Return agnoia value for thema ID."
-  (gnosis-get-thema-custom-value id :agnoia #'max gnosis-algorithm-agnoia-value
-				 t custom-tags custom-values))
+  (gnosis-get-thema-custom-value
+   id :agnoia #'max gnosis-algorithm-agnoia-value
+   t custom-tags custom-values))
 
 (defun gnosis-proto-max-values (proto-values)
   "Return max values from PROTO-VALUES."
-  (if (not (and (listp proto-values) (cl-every #'listp proto-values)))
+  (if (not (and (listp proto-values)
+                (cl-every #'listp proto-values)))
       proto-values
-    (let* ((max-len (apply #'max (mapcar #'length proto-values)))
-           (padded-lists (mapcar (lambda (lst)
-                                   (append lst (make-list (- max-len (length lst)) 0)))
-                                 proto-values)))
+    (let* ((max-len (apply #'max
+                           (mapcar #'length proto-values)))
+           (padded-lists
+            (mapcar (lambda (lst)
+                      (append lst (make-list
+                                   (- max-len (length lst))
+                                   0)))
+                    proto-values)))
       (apply #'cl-mapcar #'max padded-lists))))
 
 (defun gnosis-get-thema-proto (id &optional custom-tags custom-values)
@@ -236,19 +265,22 @@ When VALIDATE-P is non-nil, signals error if value >= 1."
 
 CUSTOM-VALUES: Custom values to be used instead.
 CUSTOM-TAGS: Custom tags to be used instead."
-  (let ((tags-proto (gnosis-get-custom-tag-values id :proto custom-tags custom-values)))
+  (let ((tags-proto (gnosis-get-custom-tag-values
+                     id :proto custom-tags custom-values)))
     (if tags-proto (gnosis-proto-max-values tags-proto)
       gnosis-algorithm-proto)))
 
 (defun gnosis-get-thema-anagnosis (id &optional custom-tags custom-values)
   "Return anagnosis value for thema ID."
-  (gnosis-get-thema-custom-value id :anagnosis #'min gnosis-algorithm-anagnosis-value
-				 nil custom-tags custom-values))
+  (gnosis-get-thema-custom-value
+   id :anagnosis #'min gnosis-algorithm-anagnosis-value
+   nil custom-tags custom-values))
 
 (defun gnosis-get-thema-lethe (id &optional custom-tags custom-values)
   "Return lethe value for thema ID."
-  (gnosis-get-thema-custom-value id :lethe #'min gnosis-algorithm-lethe-value
-				 nil custom-tags custom-values))
+  (gnosis-get-thema-custom-value
+   id :lethe #'min gnosis-algorithm-lethe-value
+   nil custom-tags custom-values))
 
 (provide 'gnosis-custom-values)
 ;;; gnosis-custom-values.el ends here
