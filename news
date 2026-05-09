@@ -1,4 +1,4 @@
-       2026/05/05 2026/04/04 2026/03/31 2026/03/26 2026/03/25 2026/03/16
+2026/05/08 2026/05/05 2026/04/04 2026/03/31 2026/03/26 2026/03/25 2026/03/16
 
 
 ⁃ [Homepage]
@@ -13,10 +13,17 @@
 [Changelog] <https://thanosapollo.org/log/gnosis/>
 
 
-1 0.10.5
+1 0.10.6
 ════════
 
-1.1 Performance
+  ⁃ Dashboard sub-views use dedicated major modes instead of minor
+    modes.
+
+
+2 0.10.5
+════════
+
+2.1 Performance
 ───────────────
 
   ⁃ Defer link-issues computation to idle timer for faster dashboard
@@ -24,67 +31,67 @@
   ⁃ Eliminate redundant database query per thema during review sessions.
 
 
-1.2 Other
+2.2 Other
 ─────────
 
   ⁃ Dashboard popup menus show item counts in the modeline.
   ⁃ Improved error reporting in database migrations.
 
 
-2 0.10.3
+3 0.10.3
 ════════
 
-2.1 Bug fixes
+3.1 Bug fixes
 ─────────────
 
   ⁃ Fix `gnosis-table-exists-p' failing to query `sqlite_master'.
   ⁃ Clean up orphaned `node-tag' and `node-links' rows on file deletion.
 
 
-3 0.10.2
+4 0.10.2
 ════════
 
-3.1 Performance
+4.1 Performance
 ───────────────
 
   ⁃ Eliminate redundant GPG decryption on save for `.org.gpg' files.
   ⁃ Git operations (add, commit, push) are now fully async.
 
 
-3.2 Other
+4.2 Other
 ─────────
 
   ⁃ `gnosis-journal-todo-keywords' defaults to `("TODO")' instead of
     inheriting `org-todo-keywords'.
 
 
-4 0.10.1
+5 0.10.1
 ════════
 
-4.1 Algorithm
+5.1 Algorithm
 ─────────────
 
   ⁃ Cap post-failure interval at 7 days to prevent overly lenient
     reschedules for mature cards.
 
 
-4.2 Bug fixes
+5.2 Bug fixes
 ─────────────
 
   ⁃ Fix `gnosis-import-db' initializing review state with wrong values,
     causing errors on first review of imported themata.
 
 
-4.3 Other
+5.3 Other
 ─────────
 
   ⁃ Demo collection shipped as `.gnosis' instead of org file.
 
 
-5 0.10.0
+6 0.10.0
 ════════
 
-5.1 Breaking changes
+6.1 Breaking changes
 ────────────────────
 
   ⁃ *Date storage migrated to integers*: review dates are now stored as
@@ -95,7 +102,7 @@
     ⁃ Old org-file exports are no longer supported.
 
 
-5.2 New features
+6.2 New features
 ────────────────
 
   ⁃ *Anki GUID-based duplicate detection*: re-importing the same deck
@@ -109,7 +116,7 @@
     commit after import.
 
 
-5.3 Performance
+6.3 Performance
 ───────────────
 
   ⁃ Due/overdue queries use integer comparison in SQL instead of Elisp
@@ -119,7 +126,7 @@
   ⁃ N+1 queries eliminated in review session and Anki model parsing.
 
 
-5.4 Bug fixes
+6.4 Bug fixes
 ─────────────
 
   ⁃ Fix proto phase failures computing amnesia-based interval instead of
@@ -130,10 +137,10 @@
     overdue.
 
 
-6 0.9.0
+7 0.9.0
 ═══════
 
-6.1 Breaking changes
+7.1 Breaking changes
 ────────────────────
 
   ⁃ *Dropped emacsql dependency*: gnosis now uses Emacs's built-in
@@ -148,7 +155,7 @@
     filtering.
 
 
-6.2 New features
+7.2 New features
 ────────────────
 
   ⁃ *Anki import*: import Anki decks or user collections directly with
@@ -162,6 +169,4 @@
     duplicates (`C'), bulk delete, and suspend/unsuspend from the
     dashboard tags view.  Tag renames are merge-safe (handles UNIQUE
     conflicts when target tag already exists).
-  ⁃ *Elapsed time intervals*: the algorithm uses actual elapsed time for
-    interval calculation.
   …  …
