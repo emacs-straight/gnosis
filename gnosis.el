@@ -317,14 +317,15 @@ Replaces links `[[source][description]]' with `description'."
          (let* ((trimmed (string-trim line))
                 ;; Replace links with just the description part
                 (processed (replace-regexp-in-string
-			    "\\[\\[\\([^]]+\\)\\]\\[\\([^]]+\\)\\]\\]"
-			    "\\2"
-			    trimmed))
+                            "\\[\\[\\([^]]+\\)\\]\\[\\([^]]+\\)\\]\\]"
+                            "\\2"
+                            trimmed))
                 ;; Fill the text to wrap it properly
-                (wrapped (with-temp-buffer
-                           (insert processed)
-                           (fill-region (point-min) (point-max))
-                           (buffer-string)))
+                (wrapped (let ((fill-column width))
+                           (with-temp-buffer
+                             (insert processed)
+                             (fill-region (point-min) (point-max))
+                             (buffer-string))))
                 ;; Process each wrapped line with proper centering
                 (wrapped-lines (split-string wrapped "\n")))
            (mapconcat
@@ -380,7 +381,7 @@ images using `org-format-latex'."
             ;; Convert overlays to text properties so they
             ;; survive buffer-string
             (dolist (ov (overlays-in (point-min) (point-max)))
-              (when-let ((display (overlay-get ov 'display)))
+              (when-let* ((display (overlay-get ov 'display)))
                 (put-text-property (overlay-start ov) (overlay-end ov)
                                    'display display)
                 (delete-overlay ov))))
@@ -620,7 +621,7 @@ Otherwise, update via `gnosis-update-thema'."
   (gnosis-add-thema--dispatch id type keimenon hypothesis
 			      answer parathema tags suspend links))
 
-(defun gnosis-add-thema--double (id type keimenon hypothesis
+(defun gnosis-add-thema--double (id _type keimenon hypothesis
 				    answer parathema tags suspend links)
   "Add a double thema (two basic themata with reversed Q/A)."
   (gnosis-add-thema--assert-common keimenon tags suspend links)

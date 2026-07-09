@@ -1,4 +1,5 @@
-This is gnosis.info, produced by makeinfo version 7.2 from gnosis.texi.
+This is gnosis.info, produced by makeinfo version 7.1.1 from
+gnosis.texi.
 
 INFO-DIR-SECTION Emacs misc features
 START-INFO-DIR-ENTRY
@@ -44,6 +45,7 @@ Installation and Setup
 * Requirements::
 * Installing from GNU ELPA::
 * Installing with GNU Guix::
+* Developing with Nix::
 * Basic Configuration::
 * Key Directories::
 * Upgrading from org-gnosis::
@@ -207,6 +209,7 @@ Link Health and Maintenance
 * Full Synchronisation::
 * Syncing the Node Database::
 * Version Control: Version Control (1).
+
 
 
 File: gnosis.info,  Node: Introduction,  Next: Installation and Setup,  Prev: Top,  Up: Top
@@ -377,6 +380,7 @@ File: gnosis.info,  Node: Installation and Setup,  Next: Nodes (1),  Prev: Intro
 * Requirements::
 * Installing from GNU ELPA::
 * Installing with GNU Guix::
+* Developing with Nix::
 * Basic Configuration::
 * Key Directories::
 * Upgrading from org-gnosis::
@@ -416,7 +420,7 @@ Gnosis is available from GNU ELPA.  To install it:
        :ensure t)
 
 
-File: gnosis.info,  Node: Installing with GNU Guix,  Next: Basic Configuration,  Prev: Installing from GNU ELPA,  Up: Installation and Setup
+File: gnosis.info,  Node: Installing with GNU Guix,  Next: Developing with Nix,  Prev: Installing from GNU ELPA,  Up: Installation and Setup
 
 2.3 Installing with GNU Guix
 ============================
@@ -425,38 +429,41 @@ Gnosis is available from the official Guix channel:
 
      guix install emacs-gnosis
 
-   For development, the repository includes a ‘guix.scm’ that mirrors
-the upstream recipe but builds from the local checkout:
+
+File: gnosis.info,  Node: Developing with Nix,  Next: Basic Configuration,  Prev: Installing with GNU Guix,  Up: Installation and Setup
+
+2.4 Developing with Nix
+=======================
+
+For development, the repository includes a ‘flake.nix’ that packages the
+local checkout and provides a complete development shell.  When ‘nix’ is
+on ‘PATH’, the ‘doc’, ‘compile’, and ‘test’ make targets automatically
+re-enter through the dev shell, so they run against the flake's isolated
+dependencies from any environment:
+
+     # Byte-compile (warnings as errors) and run all tests:
+     make test
 
      # Development shell with all dependencies:
-     guix shell -D -f guix.scm
+     nix develop
 
-     # One-shot install from the working tree:
-     guix package -f guix.scm
+     # Build the package from the working tree:
+     nix build
 
-   To use gnosis from a Guix Home configuration, load the package
-definition and reference it from your services:
+     # Run the flake test app:
+     nix run .#test
 
-     (use-modules (gnu home)
-                  (gnu home services)
-                  (gnu home services guix)
-                  (gnu services)
-                  (guix channels)
-                  (guix gexp))
+     # Validate package build and tests:
+     nix flake check
 
-     (define emacs-gnosis-git
-       (load "/path/to/gnosis/guix.scm"))
-
-     (home-environment
-      (packages (list emacs-gnosis-git)))
-
-   Re-run ‘guix home reconfigure’ after pulling new commits and the
-package will be rebuilt from the updated checkout.
+   Without ‘nix’ the targets run directly against the Emacs on ‘PATH’;
+‘GNOSIS_ENV_WRAPPED=1 make test’ forces direct execution when the
+dependencies are already available.
 
 
-File: gnosis.info,  Node: Basic Configuration,  Next: Key Directories,  Prev: Installing with GNU Guix,  Up: Installation and Setup
+File: gnosis.info,  Node: Basic Configuration,  Next: Key Directories,  Prev: Developing with Nix,  Up: Installation and Setup
 
-2.4 Basic Configuration
+2.5 Basic Configuration
 =======================
 
 The minimal configuration requires only specifying where gnosis should
@@ -480,7 +487,7 @@ use.
 
 File: gnosis.info,  Node: Key Directories,  Next: Upgrading from org-gnosis,  Prev: Basic Configuration,  Up: Installation and Setup
 
-2.5 Key Directories
+2.6 Key Directories
 ===================
 
 * Menu:
@@ -492,7 +499,7 @@ File: gnosis.info,  Node: Key Directories,  Next: Upgrading from org-gnosis,  Pr
 
 File: gnosis.info,  Node: gnosis-dir,  Next: gnosis-nodes-dir,  Up: Key Directories
 
-2.5.1 ‘gnosis-dir’
+2.6.1 ‘gnosis-dir’
 ------------------
 
 The gnosis data directory.  This is where ‘gnosis.db’ is stored.  It is
@@ -504,7 +511,7 @@ enabled.  Defaults to ‘{user-emacs-directory}/gnosis/’.
 
 File: gnosis.info,  Node: gnosis-nodes-dir,  Next: gnosis-journal-dir,  Prev: gnosis-dir,  Up: Key Directories
 
-2.5.2 ‘gnosis-nodes-dir’
+2.6.2 ‘gnosis-nodes-dir’
 ------------------------
 
 The directory containing your note files.  All ‘.org’ and ‘.org.gpg’
@@ -515,7 +522,7 @@ files in this directory are indexed by gnosis.  Defaults to ‘~/Notes/’.
 
 File: gnosis.info,  Node: gnosis-journal-dir,  Prev: gnosis-nodes-dir,  Up: Key Directories
 
-2.5.3 ‘gnosis-journal-dir’
+2.6.3 ‘gnosis-journal-dir’
 --------------------------
 
 The directory for journal entry files.  Defaults to a ‘journal/’
@@ -527,7 +534,7 @@ separately from regular nodes but use the same underlying mechanism.
 
 File: gnosis.info,  Node: Upgrading from org-gnosis,  Next: Version Control,  Prev: Key Directories,  Up: Installation and Setup
 
-2.6 Upgrading from org-gnosis
+2.7 Upgrading from org-gnosis
 =============================
 
 If you previously used org-gnosis as a separate package, gnosis
@@ -538,7 +545,7 @@ version.
 
 File: gnosis.info,  Node: Version Control,  Next: Completing Read Integration,  Prev: Upgrading from org-gnosis,  Up: Installation and Setup
 
-2.7 Version Control
+2.8 Version Control
 ===================
 
 Gnosis can automatically push your database to a remote Git repository
@@ -553,7 +560,7 @@ repository and configure a remote before enabling this option.
 
 File: gnosis.info,  Node: Completing Read Integration,  Next: Full Example Configuration,  Prev: Version Control,  Up: Installation and Setup
 
-2.8 Completing Read Integration
+2.9 Completing Read Integration
 ===============================
 
 Gnosis respects your preferred completion framework.  The
@@ -567,8 +574,8 @@ when Vertico, Ivy, Helm, or fido-mode is detected, and to
 
 File: gnosis.info,  Node: Full Example Configuration,  Prev: Completing Read Integration,  Up: Installation and Setup
 
-2.9 Full Example Configuration
-==============================
+2.10 Full Example Configuration
+===============================
 
      (use-package gnosis
        :ensure t
@@ -2141,131 +2148,132 @@ Gnosis automatically commits ‘gnosis.db’ to a Git repository inside
 
      (setq gnosis-vc-auto-push t)
 
+
 
 Tag Table:
-Node: Top227
-Node: Introduction3816
-Node: Why Gnosis4682
-Node: The Two Subsystems5639
-Node: Nodes5879
-Node: Themata6416
-Node: The Link Between Nodes and Themata7555
-Node: Greek Terminology Reference8200
-Node: Data Storage9881
-Node: Installation and Setup10324
-Node: Requirements10718
-Node: Installing from GNU ELPA11232
-Node: Installing with GNU Guix11596
-Node: Basic Configuration12760
-Node: Key Directories13535
-Node: gnosis-dir13781
-Node: gnosis-nodes-dir14197
-Node: gnosis-journal-dir14563
-Node: Upgrading from org-gnosis15008
-Node: Version Control15414
-Node: Completing Read Integration15992
-Node: Full Example Configuration16573
-Node: Nodes (1)17085
-Node: What Makes an Org Heading a Node17887
-Node: Creating and Finding Nodes18546
-Node: gnosis-nodes-find18803
-Node: gnosis-nodes-find-by-tag19390
-Node: File Naming19745
-Node: gnosis-nodes-timestring20185
-Node: GPG Encryption20983
-Node: Displaying Tags in Completion21461
-Node: Templates22031
-Node: gnosis-nodes-templates22421
-Node: The {*} Heading Marker23723
-Node: Inserting a Template Manually24690
-Node: Automatic Sync25068
-Node: Manual Sync25499
-Node: Force Rebuild26070
-Node: Links Between Nodes26331
-Node: Backlinks27209
-Node: Tags27570
-Node: Adding Tags28052
-Node: Journal28656
-Node: Creating Entries29313
-Node: gnosis-journal29502
-Node: gnosis-journal-find29721
-Node: File vs Single-File Mode30187
-Node: Separate Files (Default)30477
-Node: Single Journal File30934
-Node: GPG Encryption (1)31535
-Node: Templates (1)31918
-Node: gnosis-journal-templates32220
-Node: ``TODO'' Integration32952
-Node: gnosis-journal-todo-files33438
-Node: gnosis-journal-todo-keywords33777
-Node: Bullet Point Character34292
-Node: How TODO Carry-Forward Works34766
-Node: Checked Item Tracking35360
-Node: Inserting Journal Links36062
-Node: Full Journal Configuration Example36472
-Node: Themata (Spaced Repetition Cards)37328
-Node: Fields of a Thema38025
-Node: Thema Types39107
-Node: Basic39420
-Node: Double39831
-Node: MCQ (Multiple Choice Question)40198
-Node: Cloze40648
-Node: MC-cloze (Multiple Choice Cloze)41314
-Node: Creating Themata41697
-Node: Editing Themata42252
-Node: Tags on Themata42686
-Node: The Link Between Themata and Nodes43349
-Node: Suspending Themata44177
-Node: Review System44551
-Node: Starting a Review Session45148
-Node: Tag Filtering46180
-Node: The Review Flow46644
-Node: Type-Specific Review Behaviour48086
-Node: Basic (1)48358
-Node: MCQ48814
-Node: Cloze (1)49113
-Node: MC-cloze49520
-Node: Node-Based Review49773
-Node: Activity Logging50412
-Node: Monkeytype50781
-Node: Sample Configuration51535
-Node: The Algorithm51891
-Node: Overview52378
-Node: The Gnosis Score Triplet52939
-Node: Proto Phase53833
-Node: Interval Calculation54429
-Node: Anagnosis Events55091
-Node: Lethe55876
-Node: Fuzz56254
-Node: Day Boundary56582
-Node: Per-Tag Algorithm Customisation57409
-Node: All Algorithm Variables58695
-Node: Dashboard60116
-Node: Opening the Dashboard60517
-Node: The Themata View60981
-Node: The Nodes View61547
-Node: The Tags View62464
-Node: Export and Import62793
-Node: Exporting63246
-Node: Tag Filter Notation63789
-Node: Programmatic Use64162
-Node: Importing64394
-Node: The Export Format65135
-Node: Editing Themata (Org Format)65526
-Node: Importing from Anki65999
-Node: What Gets Imported66874
-Node: What Does Not Transfer67321
-Node: Requirements (1)67672
-Node: Link Health and Maintenance68063
-Node: Checking Link Health68627
-Node: Full Synchronisation68872
-Node: Syncing the Node Database69221
-Node: Version Control (1)69655
+Node: Top229
+Node: Introduction3843
+Node: Why Gnosis4709
+Node: The Two Subsystems5666
+Node: Nodes5906
+Node: Themata6443
+Node: The Link Between Nodes and Themata7582
+Node: Greek Terminology Reference8227
+Node: Data Storage9908
+Node: Installation and Setup10351
+Node: Requirements10769
+Node: Installing from GNU ELPA11283
+Node: Installing with GNU Guix11647
+Node: Developing with Nix11935
+Node: Basic Configuration12980
+Node: Key Directories13750
+Node: gnosis-dir13996
+Node: gnosis-nodes-dir14412
+Node: gnosis-journal-dir14778
+Node: Upgrading from org-gnosis15223
+Node: Version Control15629
+Node: Completing Read Integration16207
+Node: Full Example Configuration16788
+Node: Nodes (1)17302
+Node: What Makes an Org Heading a Node18104
+Node: Creating and Finding Nodes18763
+Node: gnosis-nodes-find19020
+Node: gnosis-nodes-find-by-tag19607
+Node: File Naming19962
+Node: gnosis-nodes-timestring20402
+Node: GPG Encryption21200
+Node: Displaying Tags in Completion21678
+Node: Templates22248
+Node: gnosis-nodes-templates22638
+Node: The {*} Heading Marker23940
+Node: Inserting a Template Manually24907
+Node: Automatic Sync25285
+Node: Manual Sync25716
+Node: Force Rebuild26287
+Node: Links Between Nodes26548
+Node: Backlinks27426
+Node: Tags27787
+Node: Adding Tags28269
+Node: Journal28873
+Node: Creating Entries29530
+Node: gnosis-journal29719
+Node: gnosis-journal-find29938
+Node: File vs Single-File Mode30404
+Node: Separate Files (Default)30694
+Node: Single Journal File31151
+Node: GPG Encryption (1)31752
+Node: Templates (1)32135
+Node: gnosis-journal-templates32437
+Node: ``TODO'' Integration33169
+Node: gnosis-journal-todo-files33655
+Node: gnosis-journal-todo-keywords33994
+Node: Bullet Point Character34509
+Node: How TODO Carry-Forward Works34983
+Node: Checked Item Tracking35577
+Node: Inserting Journal Links36279
+Node: Full Journal Configuration Example36689
+Node: Themata (Spaced Repetition Cards)37545
+Node: Fields of a Thema38242
+Node: Thema Types39324
+Node: Basic39637
+Node: Double40048
+Node: MCQ (Multiple Choice Question)40415
+Node: Cloze40865
+Node: MC-cloze (Multiple Choice Cloze)41531
+Node: Creating Themata41914
+Node: Editing Themata42469
+Node: Tags on Themata42903
+Node: The Link Between Themata and Nodes43566
+Node: Suspending Themata44394
+Node: Review System44768
+Node: Starting a Review Session45365
+Node: Tag Filtering46397
+Node: The Review Flow46861
+Node: Type-Specific Review Behaviour48303
+Node: Basic (1)48575
+Node: MCQ49031
+Node: Cloze (1)49330
+Node: MC-cloze49737
+Node: Node-Based Review49990
+Node: Activity Logging50629
+Node: Monkeytype50998
+Node: Sample Configuration51752
+Node: The Algorithm52108
+Node: Overview52595
+Node: The Gnosis Score Triplet53156
+Node: Proto Phase54050
+Node: Interval Calculation54646
+Node: Anagnosis Events55308
+Node: Lethe56093
+Node: Fuzz56471
+Node: Day Boundary56799
+Node: Per-Tag Algorithm Customisation57626
+Node: All Algorithm Variables58912
+Node: Dashboard60333
+Node: Opening the Dashboard60734
+Node: The Themata View61198
+Node: The Nodes View61764
+Node: The Tags View62681
+Node: Export and Import63010
+Node: Exporting63463
+Node: Tag Filter Notation64006
+Node: Programmatic Use64379
+Node: Importing64611
+Node: The Export Format65352
+Node: Editing Themata (Org Format)65743
+Node: Importing from Anki66216
+Node: What Gets Imported67091
+Node: What Does Not Transfer67538
+Node: Requirements (1)67889
+Node: Link Health and Maintenance68280
+Node: Checking Link Health68844
+Node: Full Synchronisation69089
+Node: Syncing the Node Database69438
+Node: Version Control (1)69872
 
 End Tag Table
 
 
 Local Variables:
 coding: utf-8
-Info-documentlanguage: en
 End:

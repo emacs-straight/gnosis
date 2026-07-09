@@ -180,37 +180,34 @@ Gnosis is available from the official Guix channel:
 guix install emacs-gnosis
 #+end_src
 
-For development, the repository includes a =guix.scm= that mirrors the
-upstream recipe but builds from the local checkout:
+** Developing with Nix
+
+For development, the repository includes a =flake.nix= that packages the
+local checkout and provides a complete development shell.  When =nix= is
+on =PATH=, the =doc=, =compile=, and =test= make targets automatically
+re-enter through the dev shell, so they run against the flake's isolated
+dependencies from any environment:
 
 #+begin_src sh
+# Byte-compile (warnings as errors) and run all tests:
+make test
+
 # Development shell with all dependencies:
-guix shell -D -f guix.scm
+nix develop
 
-# One-shot install from the working tree:
-guix package -f guix.scm
+# Build the package from the working tree:
+nix build
+
+# Run the flake test app:
+nix run .#test
+
+# Validate package build and tests:
+nix flake check
 #+end_src
 
-To use gnosis from a Guix Home configuration, load the package
-definition and reference it from your services:
-
-#+begin_src scheme
-(use-modules (gnu home)
-             (gnu home services)
-             (gnu home services guix)
-             (gnu services)
-             (guix channels)
-             (guix gexp))
-
-(define emacs-gnosis-git
-  (load "/path/to/gnosis/guix.scm"))
-
-(home-environment
- (packages (list emacs-gnosis-git)))
-#+end_src
-
-Re-run =guix home reconfigure= after pulling new commits and the
-package will be rebuilt from the updated checkout.
+Without =nix= the targets run directly against the Emacs on =PATH=;
+=GNOSIS_ENV_WRAPPED=1 make test= forces direct execution when the
+dependencies are already available.
 
 ** Basic Configuration
 
