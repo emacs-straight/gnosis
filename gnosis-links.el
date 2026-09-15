@@ -37,20 +37,54 @@
 ;;; Link extraction
 
 (defun gnosis-extract-id-links (input &optional start)
-  "Extract all link IDs from INPUT string as a list.
-
-START is the search starting position, used internally
-for recursion."
+  "Extract bracketed Org ID links from INPUT in order.
+Handle links with or without descriptions.  START is the optional
+zero-based search starting position."
   (let ((start (or start 0)))
-    (if (string-match "\\[\\[id:\\([^]]+\\)\\]\\[" input start)
-        (cons (match-string 1 input)
-              (gnosis-extract-id-links input (match-end 0)))
-      nil)))
+    (cl-loop while (string-match "\\[\\[id:\\([^]\n]+\\)\\]\\(?:\\[\\|\\]\\)"
+                                 input start)
+             collect (match-string 1 input)
+             do (setq start (match-end 0)))))
+
+;;; Node graph selection
+
+(defun gnosis-collect-nodes-at-depth (node-id &optional fwd-depth back-depth)
+  "Collect node IDs reachable from NODE-ID within depth limits.
+FWD-DEPTH is max hops for forward links (default 0).
+BACK-DEPTH is max hops for backlinks (default 0).
+At each level, both enabled directions expand the same frontier.
+A node reached through a backlink can thus be followed forward at the
+next level, and vice versa, while that direction's budget permits.
+Return a deduplicated list including NODE-ID itself, in the visited
+hash table's key order."
+  (let* ((fwd-depth (or fwd-depth 0))
+	(back-depth (or back-depth 0))
+	(max-depth (max fwd-depth back-depth))
+	(visited (make-hash-table :test 'equal))
+	(queue (list node-id)))
+    (puthash node-id t visited)
+    (dotimes (level max-depth)
+      (when queue
+	(let* ((qvec (vconcat queue))
+	       (neighbors (append
+			   (when (< level fwd-depth)
+			     (gnosis-select 'dest 'node-links
+					    `(in source ,qvec) t))
+			   (when (< level back-depth)
+			     (gnosis-select 'source 'node-links
+					    `(in dest ,qvec) t))))
+	       (next-queue nil))
+	  (dolist (neighbor neighbors)
+	    (unless (gethash neighbor visited)
+	      (puthash neighbor t visited)
+	      (push neighbor next-queue)))
+	  (setq queue next-queue))))
+    (hash-table-keys visited)))
 
 ;;; Bulk link operations
 
 (defun gnosis--themata-to-update (themata string node-id)
-  "Return list of (ID . NEW-KEIMENON) for THEMATA needing updates."
+  "Return pairs for THEMATA after replacing STRING with a link to NODE-ID."
   (cl-loop for thema in themata
            for thema-id = (nth 0 thema)
            for keimenon = (nth 1 thema)
@@ -59,29 +93,29 @@ for recursion."
            when (car result)
            collect (cons thema-id (cdr result))))
 
-(defun gnosis--update-themata-keimenon (updates)
-  "Apply UPDATES list of (ID . NEW-KEIMENON) to database."
+(defun gnosis--update-themata-keimenon (updates node-id)
+  "Apply thema keimenon pairs to the database.
+UPDATES contains (ID . NEW-KEIMENON) pairs.
+NODE-ID is added to each updated thema's link index."
   (gnosis-sqlite-with-transaction (gnosis--ensure-db)
     (dolist (update updates)
       (gnosis-update 'themata
                      `(= keimenon ,(cdr update))
-                     `(= id ,(car update))))))
+                     `(= id ,(car update)))
+      (gnosis--insert-into
+       'thema-links `([,(car update) ,node-id]) t))))
 
 (defun gnosis--commit-bulk-link (count string)
-  "Commit bulk link changes for COUNT themata with STRING."
-  (unless gnosis-testing
-    (gnosis--ensure-git-repo)
-    (gnosis--git-chain
-     `(("add" "gnosis.db")
-       ("commit" "-m"
-        ,(format "Bulk link: %d themata updated with %s"
-                 count string)))
-     (lambda ()
-       (when gnosis-vc-auto-push (gnosis-vc-push))))))
+  "Commit the bulk-link transaction for COUNT themata using STRING."
+  (gnosis-vc--auto-commit
+   (format "Bulk link: %d themata updated with %s" count string)))
 
-(defun gnosis-bulk-link-themata (ids string node-id)
-  "Replace STRING with org-link to NODE-ID in themata
-with IDS.  Return list of updated thema IDs."
+(defun gnosis-bulk-link-themata (ids string node-id &optional validate-owner)
+  "Replace STRING with a link to NODE-ID in themata with IDS.
+Return the updated thema IDs.
+When non-nil, call VALIDATE-OWNER with no arguments after confirmation,
+immediately before writing.  It must signal an error if the caller's
+initiating context is no longer valid; its return value is ignored."
   (when (string-empty-p string)
     (user-error "String cannot be empty"))
   (unless node-id
@@ -97,15 +131,15 @@ with IDS.  Return list of updated thema IDs."
       (when (y-or-n-p
              (format "Replace '%s' in %d themata? "
                      string (length updates)))
-        (gnosis--update-themata-keimenon updates)
+        (when validate-owner (funcall validate-owner))
+        (gnosis--update-themata-keimenon updates node-id)
         (gnosis--commit-bulk-link (length updates) string)
         (message "Updated %d themata with links to '%s'"
                  (length updates) string)
         (mapcar #'car updates)))))
 
 (defun gnosis-bulk-link-string (string node-id)
-  "Replace all instances of STRING in themata keimenon
-with org-link to NODE-ID."
+  "Replace all STRING instances in thema keimenon with a link to NODE-ID."
   (interactive
    (let* ((string (read-string "String to replace: "))
           (nodes (gnosis-select '[id title] 'nodes))
@@ -124,9 +158,14 @@ with org-link to NODE-ID."
 
 (defun gnosis--all-link-dests ()
   "Return all unique dest UUIDs from thema-links table."
-  (cl-remove-duplicates
-   (gnosis-select 'dest 'thema-links nil t)
-   :test #'equal))
+  (let ((seen (make-hash-table :test 'equal)) result)
+    ;; The old deduplicator kept the last occurrence.  Reverse a private
+    ;; spine, then prepend unseen IDs to preserve that order in linear time.
+    (dolist (dest (reverse (gnosis-select 'dest 'thema-links nil t)))
+      (unless (gethash dest seen)
+        (puthash dest t seen)
+        (push dest result)))
+    result))
 
 (defun gnosis--all-node-ids ()
   "Return all node IDs from both nodes and journal tables."
@@ -134,11 +173,12 @@ with org-link to NODE-ID."
           (gnosis-select 'id 'journal nil t)))
 
 (defun gnosis--orphaned-link-dests ()
-  "Return dest UUIDs in thema-links that have no
-matching node or journal entry."
+  "Return thema-link destination UUIDs without a node or journal entry."
   (let ((link-dests (gnosis--all-link-dests))
-        (node-ids (gnosis--all-node-ids)))
-    (cl-set-difference link-dests node-ids :test #'equal)))
+        (node-set (make-hash-table :test 'equal)))
+    (dolist (id (gnosis--all-node-ids))
+      (puthash id t node-set))
+    (seq-remove (lambda (dest) (gethash dest node-set)) link-dests)))
 
 (defun gnosis--orphaned-links ()
   "Return (source dest) rows where dest has no matching node."
@@ -148,8 +188,7 @@ matching node or journal entry."
                      `(in dest ,(vconcat orphaned-dests))))))
 
 (defun gnosis--node-links-missing-dest ()
-  "Return (source dest) pairs from node-links where
-dest has no matching node."
+  "Return node-link pairs whose destination has no matching node."
   (let* ((all-links (gnosis-select '[source dest]
                                    'node-links nil))
          (node-ids (gnosis--all-node-ids))
@@ -161,8 +200,7 @@ dest has no matching node."
              collect (list source dest))))
 
 (defun gnosis--node-links-missing-source ()
-  "Return (source dest) pairs from node-links where
-source has no matching node."
+  "Return node-link pairs whose source has no matching node."
   (let* ((all-links (gnosis-select '[source dest]
                                    'node-links nil))
          (node-ids (gnosis--all-node-ids))
@@ -174,8 +212,7 @@ source has no matching node."
              collect (list source dest))))
 
 (defun gnosis--delete-broken-node-links (broken-links)
-  "Delete BROKEN-LINKS list of (source dest) from
-node-links table."
+  "Delete BROKEN-LINKS pairs from the node-links table."
   (when broken-links
     (gnosis-sqlite-with-transaction (gnosis--ensure-db)
       (dolist (link broken-links)
@@ -200,18 +237,25 @@ Fetches all themata, extras, and thema-links in bulk."
                                 'extras nil))
          (all-links (gnosis-select '[source dest]
                                    'thema-links nil))
-         (extras-map (make-hash-table :test 'equal)))
-    ;; Build extras lookup
+         (themata-map (make-hash-table :test 'eql))
+         (extras-map (make-hash-table :test 'equal))
+         (expected-map (make-hash-table :test 'eql)))
+    (dolist (thema themata)
+      (puthash (car thema) (cadr thema) themata-map))
     (dolist (extra extras)
       (puthash (car extra) (cadr extra) extras-map))
-    ;; Find links in DB that aren't in text
+    ;; Preserve link order, but look up and extract each source only once.
     (cl-loop
      for (source dest) in all-links
-     for keimenon = (cadr (cl-find source themata
-                                   :key #'car))
-     for parathema = (gethash source extras-map "")
-     for expected = (gnosis--thema-expected-links
-                     (or keimenon "") (or parathema ""))
+     for expected =
+     (let ((cached (gethash source expected-map 'not-extracted)))
+       (if (eq cached 'not-extracted)
+           (puthash source
+                    (gnosis--thema-expected-links
+                     (or (gethash source themata-map) "")
+                     (or (gethash source extras-map) ""))
+                    expected-map)
+         cached))
      unless (member dest expected)
      collect (list source dest))))
 
@@ -243,6 +287,84 @@ Fetches all themata, extras, and thema-links in bulk."
                      for key = (format "%s-%s" id dest)
                      unless (gethash key links-set)
                      collect (list id dest)))))
+
+;;; Incremental link count
+
+(defun gnosis--link-audit-revision (db)
+  "Return DB's connection-local and external content change identity.
+Conservatively invalidate on any write, including rolled-back writes.
+Schema changes also invalidate the rowid cursor."
+  (list (gnosis-sqlite-select db "SELECT total_changes()")
+        (gnosis-sqlite-select db "PRAGMA data_version")
+        (gnosis-sqlite-select db "PRAGMA schema_version")))
+
+(defun gnosis--link-audit-new ()
+  "Return a private, mutable builder for an incremental link issue count.
+Only IDs, indexed links and counters survive a page; text is not retained."
+  (list :tables '(nodes journal thema-links themata node-links)
+        :after nil :count 0
+        :nodes (make-hash-table :test 'equal)
+        :links (make-hash-table :test 'equal)
+        :indexed (make-hash-table :test 'equal)
+        :orphans (make-hash-table :test 'equal)))
+
+(defun gnosis--link-audit-page (db audit)
+  "Accumulate at most 256 rows from DB into the private builder AUDIT.
+Return non-nil when all tables have been scanned.  Use indexed rowid
+pagination, including for the text/extras join, rather than fetching or
+copying the whole collection before yielding.  The caller must reject the
+builder if DB changes between pages; no transaction spans these calls."
+  (let* ((table (car (plist-get audit :tables)))
+         (after (plist-get audit :after))
+         (nodes (plist-get audit :nodes))
+         (links (plist-get audit :links))
+         (indexed (plist-get audit :indexed))
+         (orphans (plist-get audit :orphans))
+         (count (plist-get audit :count))
+         (rows
+          (gnosis-sqlite-select
+           db
+           (concat
+            (pcase-exhaustive table
+              ('nodes "SELECT t.rowid, t.id FROM nodes t")
+              ('journal "SELECT t.rowid, t.id FROM journal t")
+              ('thema-links "SELECT t.rowid, t.source, t.dest FROM thema_links t")
+              ('node-links "SELECT t.rowid, t.source, t.dest FROM node_links t")
+              ('themata
+               (concat "SELECT t.rowid, t.id, t.keimenon, e.parathema "
+                       "FROM themata t LEFT JOIN extras e ON e.id = t.id")))
+            (when after " WHERE t.rowid > ?")
+            " ORDER BY t.rowid LIMIT 256")
+           (when after (list after)))))
+    (dolist (row rows)
+      (setq after (car row))
+      (pcase-exhaustive table
+        ((or 'nodes 'journal) (puthash (nth 1 row) t nodes))
+        ('thema-links
+         (let ((pair (cdr row)) (dest (nth 2 row)))
+           ;; Initially every index row is stale; matching text subtracts it.
+           (cl-incf count)
+           (puthash pair (1+ (gethash pair links 0)) links)
+           ;; Missing links use formatted equality; stale rows do not.
+           (puthash (format "%s-%s" (car pair) dest) t indexed)
+           (unless (or (gethash dest nodes) (gethash dest orphans))
+             (puthash dest t orphans)
+             (cl-incf count))))
+        ('themata
+         (dolist (dest (gnosis--thema-expected-links
+                       (or (nth 2 row) "") (or (nth 3 row) "")))
+           (cl-decf count (gethash (list (nth 1 row) dest) links 0))
+           (unless (gethash (format "%s-%s" (nth 1 row) dest) indexed)
+             (cl-incf count))))
+        ('node-links
+         (unless (gethash (nth 1 row) nodes) (cl-incf count))
+         (unless (gethash (nth 2 row) nodes) (cl-incf count)))))
+    (setf (plist-get audit :count) count
+          (plist-get audit :after) after)
+    (when (< (length rows) 256)
+      (setf (plist-get audit :tables) (cdr (plist-get audit :tables))
+            (plist-get audit :after) nil))
+    (null (plist-get audit :tables))))
 
 ;;; Link report
 
@@ -296,17 +418,6 @@ get a keimenon excerpt."
       (truncate-string-to-width
        keimenon 60 nil nil "..."))))
 
-(defun gnosis--links-report-insert-section (heading rows)
-  "Insert link report section HEADING with ROWS.
-ROWS is a list of (source dest) pairs.  Insert the exact
-empty-section marker used by link reports when ROWS is nil."
-  (gnosis--links-report-insert-heading heading)
-  (if rows
-      (dolist (row rows)
-        (gnosis--links-report-insert-row
-         (car row) (cadr row)))
-    (insert "  None\n")))
-
 (defun gnosis--links-report-generate
     (orphaned stale missing
 	      nl-missing-dest nl-missing-source)
@@ -318,20 +429,45 @@ node-links (source dest) lists."
       (get-buffer-create "*Gnosis Link Report*")
     (let ((inhibit-read-only t))
       (erase-buffer)
-      (gnosis--links-report-insert-section
-       "Thema-links: orphaned dest" orphaned)
+      (gnosis--links-report-insert-heading
+       "Thema-links: orphaned dest")
+      (if orphaned
+          (dolist (row orphaned)
+            (gnosis--links-report-insert-row
+             (car row) (cadr row)))
+        (insert "  None\n"))
       (insert "\n")
-      (gnosis--links-report-insert-section
-       "Thema-links: stale (in DB but not in text)" stale)
+      (gnosis--links-report-insert-heading
+       "Thema-links: stale (in DB but not in text)")
+      (if stale
+          (dolist (row stale)
+            (gnosis--links-report-insert-row
+             (car row) (cadr row)))
+        (insert "  None\n"))
       (insert "\n")
-      (gnosis--links-report-insert-section
-       "Thema-links: missing (in text but not in DB)" missing)
+      (gnosis--links-report-insert-heading
+       "Thema-links: missing (in text but not in DB)")
+      (if missing
+          (dolist (row missing)
+            (gnosis--links-report-insert-row
+             (car row) (cadr row)))
+        (insert "  None\n"))
       (insert "\n")
-      (gnosis--links-report-insert-section
-       "Node-links: missing dest" nl-missing-dest)
+      (gnosis--links-report-insert-heading
+       "Node-links: missing dest")
+      (if nl-missing-dest
+          (dolist (row nl-missing-dest)
+            (gnosis--links-report-insert-row
+             (car row) (cadr row)))
+        (insert "  None\n"))
       (insert "\n")
-      (gnosis--links-report-insert-section
-       "Node-links: missing source" nl-missing-source)
+      (gnosis--links-report-insert-heading
+       "Node-links: missing source")
+      (if nl-missing-source
+          (dolist (row nl-missing-source)
+            (gnosis--links-report-insert-row
+             (car row) (cadr row)))
+        (insert "  None\n"))
       (goto-char (point-min))
       (special-mode))
     (pop-to-buffer (current-buffer))))
@@ -415,29 +551,18 @@ Each element is a (source dest) pair."
 (defun gnosis--commit-link-cleanup
     (orphaned stale missing
 	      &optional node-links-removed)
-  "Commit link cleanup changes.
+  "Commit the link-cleanup transaction.
 ORPHANED, STALE, MISSING are thema-links counts.
 NODE-LINKS-REMOVED is the number of broken node-links
 deleted."
-  (unless gnosis-testing
-    (gnosis--ensure-git-repo)
-    (gnosis--git-chain
-     `(("add" "gnosis.db")
-       ("commit" "-m"
-        ,(format
-          (concat "Link cleanup: thema-links"
-                  " %d orphaned, %d stale,"
-                  " %d missing;"
-                  " node-links %d removed")
-          orphaned stale missing
-          (or node-links-removed 0))))
-     (lambda ()
-       (when gnosis-vc-auto-push (gnosis-vc-push))))))
+  (gnosis-vc--auto-commit
+   (format (concat "Link cleanup: thema-links %d orphaned, %d stale,"
+                   " %d missing; node-links %d removed")
+           orphaned stale missing (or node-links-removed 0))))
 
 ;;;###autoload
 (defun gnosis-links-cleanup ()
-  "Remove orphaned/stale thema-links and broken
-node-links."
+  "Remove orphaned or stale thema-links and broken node-links."
   (interactive)
   (let ((orphaned-dests (gnosis--orphaned-link-dests))
         (stale (gnosis--stale-links))
@@ -457,9 +582,10 @@ node-links."
                       " %d broken node-links? ")
               (length orphaned-dests)
               (length stale) (length nl-broken)))
-        (gnosis--delete-orphaned-links orphaned-dests)
-        (gnosis--delete-stale-links stale)
-        (gnosis--delete-broken-node-links nl-broken)
+        (gnosis-sqlite-with-transaction (gnosis--ensure-db)
+          (gnosis--delete-orphaned-links orphaned-dests)
+          (gnosis--delete-stale-links stale)
+          (gnosis--delete-broken-node-links nl-broken))
         (gnosis--commit-link-cleanup
          (length orphaned-dests) (length stale)
          0 (length nl-broken))
@@ -472,8 +598,7 @@ node-links."
 
 ;;;###autoload
 (defun gnosis-links-sync ()
-  "Full re-sync: remove orphaned/stale thema-links,
-broken node-links, and insert missing."
+  "Resync links by removing broken entries and inserting missing ones."
   (interactive)
   (let ((orphaned-dests (gnosis--orphaned-link-dests))
         (stale (gnosis--stale-links))
@@ -494,10 +619,11 @@ broken node-links, and insert missing."
                       " add %d missing? ")
               (length orphaned-dests) (length stale)
               (length nl-broken) (length missing)))
-        (gnosis--delete-orphaned-links orphaned-dests)
-        (gnosis--delete-stale-links stale)
-        (gnosis--delete-broken-node-links nl-broken)
-        (gnosis--insert-missing-links missing)
+        (gnosis-sqlite-with-transaction (gnosis--ensure-db)
+          (gnosis--delete-orphaned-links orphaned-dests)
+          (gnosis--delete-stale-links stale)
+          (gnosis--delete-broken-node-links nl-broken)
+          (gnosis--insert-missing-links missing))
         (gnosis--commit-link-cleanup
          (length orphaned-dests) (length stale)
          (length missing) (length nl-broken))

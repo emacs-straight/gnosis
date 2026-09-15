@@ -4,9 +4,9 @@
 
 ;; Author: Thanos Apollo <public@thanosapollo.org>
 ;; Keywords: extensions
-;; URL: https://codeberg.org/thanosapollo/emacs-gnosis
+;; URL: https://git.thanosapollo.org/emacs-gnosis
 
-;; Version: 0.10.6
+;; Version: 0.11.0
 
 ;; Package-Requires: ((emacs "29.1") (compat "29.1.4.2")
 ;;                     (keymap-popup "0.2.0"))
@@ -46,28 +46,32 @@
 ;; Everything lives in one database: themata, review history,
 ;; nodes, node links, and thema-to-node links.
 ;;
-;; The spaced repetition algorithm is highly adjustable, allowing
-;; users to set specific values for tags, creating a personalized
-;; learning environment for each topic.
+;; Gnosis uses FSRS-6 for spaced-repetition scheduling.  Tags organise
+;; themata and select focused review sessions without changing scheduler
+;; parameters.
 
 ;;; Code:
 
 (require 'cl-lib)
+(require 'seq)
 (require 'subr-x)
 
 (require 'gnosis-db)
+(require 'gnosis-model)
+(require 'gnosis-image)
+(require 'gnosis-scheduler)
+(require 'gnosis-logical-day)
 (require 'gnosis-vc)
 (require 'gnosis-tags)
-(require 'gnosis-custom-values)
 (require 'gnosis-links)
 (require 'animate)
 
 (require 'org)
 (require 'org-element)
 
-(require 'gnosis-algorithm)
 (require 'gnosis-monkeytype)
 (require 'gnosis-utils)
+(require 'gnosis-answer)
 (require 'gnosis-org)
 (require 'gnosis-cloze)
 (require 'gnosis-nodes)
@@ -189,7 +193,11 @@ This is set automatically based on buffer type:
     ("MCQ" .  gnosis-add-thema--mcq)
     ("Double" .  gnosis-add-thema--double)
     ("Cloze" . gnosis-add-thema--cloze)
-    ("MC-cloze" . gnosis-add-thema--mc-cloze))
+    ("MC-cloze" . gnosis-add-thema--mc-cloze)
+    ("Model" . gnosis-model--save)
+    ("Model-name" . gnosis-model--save)
+    ("Image-region" . gnosis-image--save)
+    ("Image-occlusion" . gnosis-image--save))
   "Mapping of Themata & their respective functions.")
 
 (defvar gnosis-previous-thema-hint nil
@@ -213,7 +221,6 @@ This is set automatically based on buffer type:
 (autoload 'gnosis-display-next-review "gnosis-review")
 (autoload 'gnosis-get-linked-nodes "gnosis-review")
 (autoload 'gnosis-monkeytype-start "gnosis-review" nil t)
-(autoload 'gnosis-history-clear "gnosis-review" nil t)
 
 ;; Anki import autoload
 (autoload 'gnosis-import-anki "gnosis-anki" nil t)
@@ -240,33 +247,45 @@ Each function is called with the saved thema ID (integer).")
 (defun gnosis-delete-thema (id &optional verification)
   "Delete thema with ID.
 
-When VERIFICATION is non-nil, skip `y-or-n-p' prompt."
+When VERIFICATION is non-nil, skip `y-or-n-p' prompt.
+Return t when deletion completes, or nil when confirmation is declined.
+Errors and quits propagate without reporting completion."
   (when (or verification (y-or-n-p "Delete thema?"))
     (gnosis-delete-themata (list id))))
 
 (defun gnosis-delete-themata (ids)
-  "Delete themata with IDS, batched to stay within SQL variable limits."
+  "Delete themata with IDS, batched to stay within SQL variable limits.
+Return t after the transaction completes, including for already absent IDs.
+Errors and quits roll back the transaction and propagate to the caller."
   (let ((db (gnosis--ensure-db)))
     (gnosis-sqlite-with-transaction db
-      (dolist (table '("thema_tag" "thema_links" "review"
-                       "review_log" "extras" "themata"))
+      (dolist (table '("thema_tag" "thema_links" "extras" "themata"))
         (gnosis-sqlite-execute-batch db
 				     (format "DELETE FROM %s WHERE %s IN (%%s)"
 					     table
 					     (if (string= table "thema_tag") "thema_id"
 					       (if (string= table "thema_links") "source" "id")))
-				     ids)))))
+				     ids)))
+    t))
 
+
+(defun gnosis-review-activity (&optional date)
+  "Return aggregate review activity, optionally only for DATE.
+Rows have the shape (DATE REVIEWED-TOTAL REVIEWED-NEW).  A missing DATE
+returns an explicit zero row without mutating review evidence."
+  (let ((rows (gnosis-db-review-activity)))
+    (if date (or (assoc date rows) (list date 0 0)) rows)))
 
 (defun gnosis-calculate-average-daily-reviews (&optional days)
   "Calculate average reviews over the last DAYS days."
   (let* ((days (or days gnosis-default-average-review-period))
 	 (dates (cl-loop for d from 0 below days
-			 collect (gnosis--date-to-int (gnosis-algorithm-date (- d)))))
-	 (review-counts (gnosis-select 'reviewed-total 'activity-log
-				       `(and (> reviewed-total 0)
-					     (in date ,(vconcat dates)))
-				       t)))
+			 collect (gnosis--date-to-int (gnosis-date (- d)))))
+	 (activity (gnosis-review-activity))
+	 (review-counts
+	  (cl-loop for date in dates
+		   for count = (nth 1 (assoc date activity))
+		   when (and count (> count 0)) collect count)))
     (if review-counts
 	(/ (apply #'+ review-counts) (float (length review-counts)))
       0)))
@@ -297,35 +316,43 @@ History is disabled."
                            'face 'gnosis-face-separator)))
 
 (defun gnosis-center-current-line ()
-  "Centers text in the current line ignoring leading spaces."
+  "Center the current text line, ignoring leading spaces.
+Leave display-bearing lines intact; their widths are not character counts."
   (let* ((start (line-beginning-position))
          (end (line-end-position))
          (text (string-trim (buffer-substring start end)))
          (padding (max (/ (- (window-width) (length text)) 2) 0)))
-    (delete-region start end)
-    (insert (make-string padding ? ) text)))
+    ;; Display objects have pixel widths, not the width of their backing text.
+    (unless (text-property-not-all start end 'display nil)
+      (delete-region start end)
+      (insert (make-string padding ? ) text))))
 
 (defun gnosis-center-string (str)
-  "Center each line of STR in current window width.
-Replaces links `[[source][description]]' with `description'."
+  "Center each text line of STR in current window width.
+Replace links `[[source][description]]' with `description'.
+Leave display-bearing lines unfilled and unpadded, preserving their properties."
   (let* ((width (window-width))
          (lines (split-string str "\n")))
     (mapconcat
      (lambda (line)
-       (if (string-blank-p line)
-           ""  ;; Preserve blank lines
+       (cond
+        ;; Do not trim/fill image-bearing spaces or pad by character width.
+        ((text-property-not-all 0 (length line) 'display nil line)
+         (replace-regexp-in-string
+          "\\[\\[\\([^]]+\\)\\]\\[\\([^]]+\\)\\]\\]" "\\2" line))
+        ((string-blank-p line) "")
+        (t
          (let* ((trimmed (string-trim line))
                 ;; Replace links with just the description part
                 (processed (replace-regexp-in-string
-                            "\\[\\[\\([^]]+\\)\\]\\[\\([^]]+\\)\\]\\]"
-                            "\\2"
-                            trimmed))
+			    "\\[\\[\\([^]]+\\)\\]\\[\\([^]]+\\)\\]\\]"
+			    "\\2"
+			    trimmed))
                 ;; Fill the text to wrap it properly
-                (wrapped (let ((fill-column width))
-                           (with-temp-buffer
-                             (insert processed)
-                             (fill-region (point-min) (point-max))
-                             (buffer-string))))
+                (wrapped (with-temp-buffer
+                           (insert processed)
+                           (fill-region (point-min) (point-max))
+                           (buffer-string)))
                 ;; Process each wrapped line with proper centering
                 (wrapped-lines (split-string wrapped "\n")))
            (mapconcat
@@ -333,7 +360,7 @@ Replaces links `[[source][description]]' with `description'."
 	      (let ((padding (max 0 (/ (- width (string-width wline)) 2))))
                 (concat (make-string padding ?\s) wline)))
 	    wrapped-lines
-	    "\n"))))
+	    "\n")))))
      lines
      "\n")))
 
@@ -342,6 +369,7 @@ Replaces links `[[source][description]]' with `description'."
 
 When `gnosis-center-content' is non-nil, centers the text.
 Otherwise, just processes org-links without centering."
+  (setq str (gnosis-image-format-string str))
   (if gnosis-center-content
       (gnosis-center-string str)
     (replace-regexp-in-string
@@ -386,7 +414,20 @@ images using `org-format-latex'."
                                    'display display)
                 (delete-overlay ov))))
         (error (message "LaTeX preview: %s" (error-message-string err)))))
-    (buffer-string)))
+    (gnosis-image-format-string (buffer-string))))
+
+(defun gnosis-cloze-create (str clozes &optional cloze-string)
+  "Render STR as Org and replace CLOZES with CLOZE-STRING.
+Preserve whitespace patterns and replace each cloze's preferred occurrence.
+CLOZE-STRING defaults to `gnosis-cloze-string'.  Fontification and optional
+LaTeX preview run once, before substitution, as in `gnosis-org-format-string'."
+  (cl-assert (listp clozes) nil "Adding clozes: Clozes need to be a list.")
+  (let ((cloze-string (or cloze-string gnosis-cloze-string))
+        ;; Match the original temporary buffer's default search context,
+        ;; rather than inheriting the calling mode's local search settings.
+        (case-fold (default-value 'case-fold-search)))
+    (gnosis-cloze--replace (gnosis-org-format-string str)
+                          clozes cloze-string case-fold)))
 
 (cl-defun gnosis--prompt (prompt &optional (downcase nil) (split nil))
   "PROMPT user for input until `q' is given.
@@ -418,12 +459,15 @@ explicitly (safe for bulk operations).
 
 When VERIFICATION is non-nil, skips `y-or-n-p' prompt."
   (cl-assert (listp ids) nil "IDS value needs to be a list.")
+  (cl-assert (or (null suspend-value)
+                 (memq suspend-value '(0 1)))
+             nil "SUSPEND-VALUE must be nil, 0, or 1.")
   (let* ((items-num (length ids))
          (suspend-value
           (or suspend-value
               (if (= items-num 1)
-                  (if (= (gnosis-get 'suspend 'review-log
-                                     `(= id ,(car ids)))
+                  (if (= (gnosis-get 'suspended 'scheduler-state
+                                     `(= thema-id ,(car ids)))
                          1)
                       0 1)
                 1)))
@@ -434,10 +478,11 @@ When VERIFICATION is non-nil, skips `y-or-n-p' prompt."
                   (y-or-n-p (format "%s thema? " action))
                 (y-or-n-p (format "%s %d themata? " action items-num))))))
     (when verification
-      (gnosis-sqlite-execute-batch (gnosis--ensure-db)
-				   "UPDATE review_log SET suspend = ? WHERE id IN (%s)"
-				   ids
-				   (list suspend-value)))))
+      (let ((db (gnosis--ensure-db)))
+        (gnosis-sqlite-with-transaction db
+          (gnosis-sqlite-execute-batch
+           db "UPDATE scheduler_state SET suspended = ?
+                WHERE thema_id IN (%s)" ids (list suspend-value)))))))
 
 (defun gnosis-mcq-answer (id)
   "Choose the correct answer, from mcq choices for question ID."
@@ -446,36 +491,32 @@ When VERIFICATION is non-nil, skips `y-or-n-p' prompt."
     (gnosis-completing-read "Answer: " choices)))
 
 (defun gnosis-compare-strings (str1 str2)
-  "Compare STR1 and STR2, ignoring case and whitespace."
-  (let* ((normalized-str1 (downcase
-			   (replace-regexp-in-string "\\s-" ""
-						     (gnosis-utils-trim-quotes str1))))
-         (normalized-str2 (downcase
-			   (replace-regexp-in-string "\\s-" ""
-						     (gnosis-utils-trim-quotes str2))))
-         (max-length (max (length normalized-str1) (length normalized-str2))))
-    (if (> max-length gnosis-string-difference)
-        (<= (string-distance normalized-str1 normalized-str2)
-            gnosis-string-difference)
-      (string= normalized-str1 normalized-str2))))
+  "Compare STR1 and STR2 with the configured typo tolerance.
+Ignore quote wrappers, case and whitespace, preserving short-string rules."
+  (gnosis-answer-match-p str1 str2 nil gnosis-string-difference))
 
 (defun gnosis--read-string-with-input-method (prompt answer)
   "Read string with PROMPT, activating input method matching ANSWER's script.
 Activates the input method in the current buffer so `read-string' with
-INHERIT-INPUT-METHOD propagates it into the minibuffer.  Restores the
-previous state on exit."
+INHERIT-INPUT-METHOD propagates it into the minibuffer.  Restore the
+original buffer's previous input method on return, error or quit."
   (let ((method (alist-get (gnosis-utils-detect-script answer)
-                           gnosis-script-input-method-alist)))
+                           gnosis-script-input-method-alist))
+        (buffer (current-buffer))
+        (previous-method current-input-method))
     (if (not method)
         (read-string prompt)
-      (activate-input-method method)
       (unwind-protect
-          (read-string prompt nil nil nil t)
-        (deactivate-input-method)))))
+          (progn
+            (activate-input-method method)
+            (read-string prompt nil nil nil t))
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (activate-input-method previous-method)))))))
 
 (defun gnosis-suspended-p (id)
   "Return t if thema with ID is suspended."
-  (= (gnosis-get 'suspend 'review-log `(= id ,id)) 1))
+  (= (gnosis-get 'suspended 'scheduler-state `(= thema-id ,id)) 1))
 
 (cl-defun gnosis-collect-thema-ids (&key tags due query)
   "Return list of thema IDs filtered by TAGS, DUE, QUERY.
@@ -495,17 +536,28 @@ QUERY: search string."
 (defun gnosis-get-themata-by-reviews (max-reviews &optional thema-ids)
   "Return thema IDs with at most MAX-REVIEWS total reviews.
 When THEMA-IDS is non-nil, restrict to that subset."
-  (gnosis-select 'id 'review-log
+  (gnosis-select 'thema-id 'scheduler-state
                  (if thema-ids
-                     `(and (<= n ,max-reviews)
-                           (in id ,(vconcat thema-ids)))
-                   `(<= n ,max-reviews))
+                     `(and (<= reps ,max-reviews)
+                           (in thema-id ,(vconcat thema-ids)))
+                   `(<= reps ,max-reviews))
                  t))
 
 
+(defun gnosis--validate-accepted-aliases (type answer aliases)
+  "Validate ALIASES for TYPE and canonical ANSWER before a content write."
+  (gnosis-answer-validate-aliases aliases)
+  (when aliases
+    (unless (and (member (downcase type) '("basic" "image-occlusion" "model-name"))
+                 (proper-list-p answer) (= (length answer) 1)
+                 (stringp (car answer))
+                 (not (string-empty-p (string-trim (car answer)))))
+      (user-error "Accepted aliases require one canonical typed answer")))
+  aliases)
+
 (defun gnosis-add-thema-fields (type keimenon hypothesis answer
 				     parathema tags suspend links
-				     &optional review-image gnosis-id)
+				     &optional review-image gnosis-id accepted-aliases)
   "Insert fields for new thema.
 
 TYPE: Thema type e.g \"mcq\"
@@ -517,8 +569,16 @@ cloze/basic a string/list of the right answer(s)
 PARATHEMA: Parathema information to display after the answer
 TAGS: Tags to organize themata
 SUSPEND: Integer value of 1 or 0, where 1 suspends the card.
-LINKS: List of id links."
+LINKS: List of id links.
+REVIEW-IMAGE is optional image data and GNOSIS-ID is an optional ID.
+ACCEPTED-ALIASES is an optional list of explicitly accepted typed spellings."
   (cl-assert (stringp type) nil "Type must be a string")
+  (gnosis--validate-accepted-aliases type answer accepted-aliases)
+  (gnosis-image-validate-fields type keimenon hypothesis answer parathema review-image)
+  (when (equal (downcase type) "model")
+    (gnosis-model-resolve hypothesis answer))
+  (when (equal (downcase type) "model-name")
+    (gnosis-model-fields type hypothesis answer))
   (cl-assert (stringp keimenon) nil "Keimenon must be a string")
   (cl-assert (listp hypothesis) nil "Hypothesis value must be a list")
   (cl-assert (listp answer) nil "Answer value must be a list")
@@ -526,42 +586,50 @@ LINKS: List of id links."
   (cl-assert (listp tags) nil "Tags must be a list")
   (cl-assert (listp links) nil "Links must be a list")
   (let* ((gnosis-id (or gnosis-id (gnosis-generate-id)))
-	 (review-image (or review-image "")))
+	 (review-image (or review-image ""))
+         (today (gnosis--today-int)))
     (gnosis-sqlite-with-transaction (gnosis--ensure-db)
-      (gnosis--insert-into 'themata
-			   `([,gnosis-id ,(downcase type)
-					 ,keimenon ,hypothesis
-					 ,answer nil]))
-      (gnosis--insert-into 'review
-			   `([,gnosis-id
-			      ,gnosis-algorithm-gnosis-value
-			      ,gnosis-algorithm-amnesia-value]))
-      (gnosis--insert-into 'review-log `([,gnosis-id ,(gnosis--today-int)
-						     ,(gnosis--today-int) 0 0 0 0
-						     ,suspend 0]))
+      ;; Name owned columns so retained archive metadata keeps its default.
+      ;; Store an absent hint as the readable empty list under NOT NULL.
+      (gnosis-sqlite-execute
+       (gnosis--ensure-db)
+       "INSERT INTO themata (id, type, keimenon, hypothesis, answer, source_guid, accepted_aliases)
+        VALUES (?, ?, ?, COALESCE(?, 'nil'), ?, NULL, ?)"
+       (list gnosis-id (downcase type) keimenon hypothesis answer accepted-aliases))
+      (gnosis-scheduler-initialize-thema gnosis-id today suspend)
       (gnosis--insert-into 'extras `([,gnosis-id ,parathema ,review-image]))
       (cl-loop for link in links
 	       do (gnosis--insert-into 'thema-links `([,gnosis-id ,link])))
       (cl-loop for tag in tags
 	       do (gnosis--insert-into 'thema-tag `([,gnosis-id ,tag]))))))
 
-(defun gnosis-update-thema (id keimenon hypothesis answer parathema tags links
-			       &optional type)
-  "Update thema entry for ID.
+(cl-defun gnosis-update-thema (id keimenon hypothesis answer parathema tags links
+			       &optional type (accepted-aliases nil aliases-p))
+  "Update thema ID with KEIMENON, HYPOTHESIS, ANSWER, and PARATHEMA.
+TAGS and LINKS replace existing associations; TYPE optionally changes type.
+Omitted ACCEPTED-ALIASES preserves stored aliases; explicit nil clears them.
 
-If gnosis ID does not exist, create it anew and issue a warning.
+If ID does not exist, TYPE is required to create it anew and issue a warning.
 When `gnosis--id-cache' is bound, uses hash table for existence check."
   (let* ((id (if (stringp id) (string-to-number id) id))
-	 (current-type (gnosis-get 'type 'themata `(= id ,id))))
+	 (current-type (gnosis-get 'type 'themata `(= id ,id)))
+         (accepted-aliases (if aliases-p accepted-aliases
+                             (gnosis-get 'accepted-aliases 'themata `(= id ,id)))))
+    (gnosis--validate-accepted-aliases (or type current-type "") answer accepted-aliases)
+    (gnosis-image-validate-fields (or type current-type "") keimenon hypothesis answer parathema)
+    (when (equal (downcase (or type current-type "")) "model")
+      (gnosis-model-resolve hypothesis answer))
+    (when (equal (downcase (or type current-type "")) "model-name")
+      (gnosis-model-fields (or type current-type) hypothesis answer))
     (if (if gnosis--id-cache
 	    (gethash id gnosis--id-cache)
 	  (member id (gnosis-select 'id 'themata nil t)))
 	(gnosis-sqlite-with-transaction (gnosis--ensure-db)
 	  ;; Single multi-column UPDATE for themata
 	  (gnosis-sqlite-execute (gnosis--ensure-db)
-				 "UPDATE themata SET keimenon = ?, hypothesis = ?, answer = ?, type = ? WHERE id = ?"
+				 "UPDATE themata SET keimenon = ?, hypothesis = COALESCE(?, 'nil'), answer = ?, type = ?, accepted_aliases = ? WHERE id = ?"
 				 (list keimenon hypothesis answer
-				       (or type current-type) id))
+				       (or type current-type) accepted-aliases id))
 	  ;; Single UPDATE for extras
 	  (gnosis-update 'extras `(= parathema ,parathema) `(= id ,id))
 	  ;; Re-sync links
@@ -576,7 +644,7 @@ When `gnosis--id-cache' is bound, uses hash table for existence check."
 		       (format "Thema id:%d does not exist, creating anew" id)
 		       :warning)
       (gnosis-add-thema-fields type keimenon hypothesis answer parathema tags
-			       0 links nil id))))
+			       0 links nil id accepted-aliases))))
 
 ;;;;;;;;;;;;;;;;;;;;;; THEMA HELPERS ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; These functions provide assertions depending on the type of thema.
@@ -598,32 +666,43 @@ KEIMENON, TAGS, SUSPEND, and LINKS are validated."
   (cl-assert (and (listp links) (cl-every #'stringp links))
              nil "Links must be a list of strings."))
 
-(defun gnosis-add-thema--dispatch (id type keimenon hypothesis
-				      answer parathema tags suspend links)
-  "Dispatch thema creation or update for ID.
+(cl-defun gnosis-add-thema--dispatch (id type keimenon hypothesis
+				      answer parathema tags suspend links
+                                      &optional (accepted-aliases nil aliases-p))
+  "Dispatch creation or update for thema ID of TYPE.
+KEIMENON, HYPOTHESIS, ANSWER, PARATHEMA, TAGS, SUSPEND, and LINKS are fields.
 When ID is \"NEW\", create via `gnosis-add-thema-fields'.
-Otherwise, update via `gnosis-update-thema'."
+Otherwise, update via `gnosis-update-thema'.
+Omitted ACCEPTED-ALIASES preserves them on update; explicit nil clears them."
   (if (equal id "NEW")
       (gnosis-add-thema-fields type keimenon (or hypothesis (list ""))
-			       answer parathema tags suspend links)
-    (gnosis-update-thema id keimenon hypothesis answer
-                         parathema tags links type)))
+			       answer parathema tags suspend links nil nil accepted-aliases)
+    (apply #'gnosis-update-thema id keimenon hypothesis answer
+           parathema tags links type (when aliases-p (list accepted-aliases)))))
 
-(defun gnosis-add-thema--basic (id type keimenon hypothesis
-				   answer parathema tags suspend links)
-  "Add or update a basic thema."
+(cl-defun gnosis-add-thema--basic (id type keimenon hypothesis
+				   answer parathema tags suspend links
+                                   &optional (accepted-aliases nil aliases-p))
+  "Add or update basic thema ID of TYPE.
+Use KEIMENON, HYPOTHESIS, ANSWER, PARATHEMA, TAGS, SUSPEND, and LINKS as fields.
+ACCEPTED-ALIASES explicitly replaces aliases when supplied."
   (gnosis-add-thema--assert-common keimenon tags suspend links)
   (cl-assert (or (null hypothesis)
 		 (and (listp hypothesis) (= (length hypothesis) 1)))
 	     nil "Hypothesis must be a list of a single item or nil.")
   (cl-assert (and (listp answer) (= (length answer) 1))
 	     nil "Answer must be a list of a single item.")
-  (gnosis-add-thema--dispatch id type keimenon hypothesis
-			      answer parathema tags suspend links))
+  (apply #'gnosis-add-thema--dispatch id type keimenon hypothesis
+         answer parathema tags suspend links (when aliases-p (list accepted-aliases))))
 
-(defun gnosis-add-thema--double (id _type keimenon hypothesis
-				    answer parathema tags suspend links)
-  "Add a double thema (two basic themata with reversed Q/A)."
+(cl-defun gnosis-add-thema--double (id _type keimenon hypothesis
+				    answer parathema tags suspend links
+                                    &optional (accepted-aliases nil aliases-p))
+  "Add or update double thema ID, ignoring _TYPE.
+Use KEIMENON, HYPOTHESIS, ANSWER, PARATHEMA, TAGS, SUSPEND, and LINKS as fields.
+When ID is \"NEW\", create two basic themata with reversed question and answer;
+otherwise update the existing thema.
+ACCEPTED-ALIASES applies only to the forward answer when supplied."
   (gnosis-add-thema--assert-common keimenon tags suspend links)
   (cl-assert (listp hypothesis) nil "Hypothesis must be a list.")
   (cl-assert (and (listp answer) (= (length answer) 1))
@@ -633,15 +712,18 @@ Otherwise, update via `gnosis-update-thema'."
     (if (equal id "NEW")
 	(progn
 	  (gnosis-add-thema-fields type keimenon hypothesis
-				   answer parathema tags suspend links)
+				   answer parathema tags suspend links nil nil accepted-aliases)
 	  (gnosis-add-thema-fields type (car answer) hypothesis
 				   (list keimenon) parathema tags suspend links))
-      (gnosis-update-thema id keimenon hypothesis answer
-                           parathema tags links type))))
+      (apply #'gnosis-update-thema id keimenon hypothesis answer
+             parathema tags links type (when aliases-p (list accepted-aliases))))))
 
-(defun gnosis-add-thema--mcq (id type keimenon hypothesis
-				 answer parathema tags suspend links)
-  "Add or update an MCQ thema."
+(cl-defun gnosis-add-thema--mcq (id type keimenon hypothesis
+				 answer parathema tags suspend links
+                                 &optional (accepted-aliases nil aliases-p))
+  "Add or update MCQ thema ID of TYPE.
+Use KEIMENON, HYPOTHESIS, ANSWER, PARATHEMA, TAGS, SUSPEND, and LINKS as fields.
+ACCEPTED-ALIASES must be nil for choice-based responses."
   (gnosis-add-thema--assert-common keimenon tags suspend links)
   (cl-assert (string= type "mcq") nil "TYPE must be \"mcq\".")
   (cl-assert (and (listp hypothesis) (> (length hypothesis) 1))
@@ -649,14 +731,18 @@ Otherwise, update via `gnosis-update-thema'."
   (cl-assert (and (listp answer) (= (length answer) 1)
 		  (member (car answer) hypothesis))
 	     nil "Answer must be a single item, member of hypothesis.")
-  (gnosis-add-thema--dispatch id type keimenon hypothesis
-			      answer parathema tags suspend links))
+  (apply #'gnosis-add-thema--dispatch id type keimenon hypothesis
+         answer parathema tags suspend links (when aliases-p (list accepted-aliases))))
 
-(defun gnosis-add-thema--cloze (id type keimenon hypothesis
-				   answer parathema tags suspend links)
-  "Add or update a cloze thema."
+(cl-defun gnosis-add-thema--cloze (id type keimenon hypothesis
+				   answer parathema tags suspend links
+                                   &optional (accepted-aliases nil aliases-p))
+  "Add or update cloze thema ID of TYPE.
+Use KEIMENON, HYPOTHESIS, ANSWER, PARATHEMA, TAGS, SUSPEND, and LINKS as fields.
+ACCEPTED-ALIASES must be nil: cloze answers are separate required blanks."
   (gnosis-add-thema--assert-common keimenon tags suspend links)
   (cl-assert (string= type "cloze") nil "TYPE must be \"cloze\".")
+  (gnosis--validate-accepted-aliases type answer accepted-aliases)
   (cl-assert (or (null hypothesis) (>= (length answer) (length hypothesis)))
 	     nil "Hypothesis length must not exceed answer length.")
   (cl-assert (listp answer) nil "Answer must be a list.")
@@ -674,12 +760,15 @@ Otherwise, update via `gnosis-update-thema'."
 						   parathema tags suspend links)))
 	  (gnosis-add-thema-fields type keimenon-clean (or hypothesis (list ""))
 				   answer parathema tags suspend links))
-      (gnosis-update-thema id keimenon-clean hypothesis
-                           answer parathema tags links type))))
+      (apply #'gnosis-update-thema id keimenon-clean hypothesis
+             answer parathema tags links type (when aliases-p (list accepted-aliases))))))
 
-(defun gnosis-add-thema--mc-cloze (id type keimenon hypothesis
-				      answer parathema tags suspend links)
-  "Add or update an mc-cloze thema."
+(cl-defun gnosis-add-thema--mc-cloze (id type keimenon hypothesis
+				      answer parathema tags suspend links
+                                      &optional (accepted-aliases nil aliases-p))
+  "Add or update mc-cloze thema ID of TYPE.
+Use KEIMENON, HYPOTHESIS, ANSWER, PARATHEMA, TAGS, SUSPEND, and LINKS as fields.
+ACCEPTED-ALIASES must be nil for choice-based responses."
   (gnosis-add-thema--assert-common keimenon tags suspend links)
   (cl-assert (string= type "mc-cloze") nil "TYPE must be \"mc-cloze\".")
   (cl-assert (and (listp hypothesis) (> (length hypothesis) (length answer)))
@@ -690,36 +779,176 @@ Otherwise, update via `gnosis-update-thema'."
   (cl-assert (gnosis-cloze-check keimenon answer) nil
 	     "Cloze answers are not part of keimenon.")
   (let ((keimenon-clean (gnosis-cloze-remove-tags keimenon)))
-    (gnosis-add-thema--dispatch id type keimenon-clean hypothesis
-				answer parathema tags suspend links)))
+    (apply #'gnosis-add-thema--dispatch id type keimenon-clean hypothesis
+           answer parathema tags suspend links (when aliases-p (list accepted-aliases)))))
 
 ;;;###autoload
-(defun gnosis-add-thema (type &optional keimenon hypothesis
-			      answer parathema tags example)
-  "Add thema with TYPE."
+(defun gnosis-add-model-name-thema ()
+  "Create a typed-name thema for a visibly highlighted model target."
+  (interactive)
+  (gnosis-add-model-thema "model-name"))
+
+(defvar-local gnosis--draft-db nil
+  "Database connection that owns the current native draft.")
+
+(defvar-local gnosis--draft-original nil
+  "Original edit content as (ID . SNAPSHOT), or nil for a creation draft.")
+
+(defvar-local gnosis--draft-save-receipt nil
+  "Optional one-cell receipt owned by this native edit occurrence.
+A successful save fills its car with (DATABASE ID CONTENT), before closing
+or running user hooks.  CONTENT holds the saved response and extras rows;
+review can acknowledge this write without replacing the answered content.")
+
+(defun gnosis--draft-content (db id)
+  "Return the retained content of thema ID on DB, excluding study state."
+  (mapcar (lambda (sql) (sqlite-select db sql (list id)))
+          '("SELECT type, keimenon, hypothesis, answer, accepted_aliases
+               FROM themata WHERE id = ?"
+            "SELECT parathema, review_image FROM extras WHERE id = ?"
+            "SELECT tag FROM thema_tag WHERE thema_id = ? ORDER BY tag"
+            "SELECT dest FROM thema_links WHERE source = ? ORDER BY dest")))
+
+(defun gnosis--draft-check-owner ()
+  "Refuse saving a draft without its original live database connection."
+  (unless (and gnosis--draft-db (eq gnosis-db gnosis--draft-db)
+               (condition-case nil
+                   (sqlite-select gnosis--draft-db "SELECT 1")
+                 (error nil)))
+    (user-error
+     (concat "Draft database closed or changed; copy your draft text, "
+             "cancel, then reopen it in the intended database and reconcile"))))
+
+(defun gnosis--draft-validate (themata)
+  "Validate parsed THEMATA against the draft owner and original content.
+Call inside the save transaction, before any thema writes."
+  (gnosis--draft-check-owner)
+  (when (and gnosis--draft-original
+             (not (equal (cdr gnosis--draft-original)
+                         (gnosis--draft-content
+                          gnosis--draft-db (car gnosis--draft-original)))))
+    (user-error
+     (concat "Thema changed or was deleted; copy your draft text, cancel, "
+             "then reopen the current thema and reconcile your edits")))
+  (unless (cl-every (lambda (thema)
+                      (or (equal (car thema) "NEW")
+                          (and gnosis--draft-original
+                               (equal (car thema)
+                                      (number-to-string
+                                       (car gnosis--draft-original))))))
+                    themata)
+    (user-error
+     "Draft target changed; copy your text and reopen the intended thema")))
+
+;;;###autoload
+(cl-defun gnosis-add-thema (type &optional keimenon hypothesis
+			      answer parathema tags example
+                              (accepted-aliases nil aliases-p))
+  "Add thema with TYPE and optional KEIMENON, HYPOTHESIS, and fields.
+The remaining optional fields are ANSWER, PARATHEMA, TAGS, EXAMPLE,
+and explicit ACCEPTED-ALIASES."
   (interactive (list
 		(downcase (completing-read "Select type: " gnosis-thema-types))))
-  (window-configuration-to-register :gnosis-edit)
-  (pop-to-buffer "*Gnosis NEW*")
-  (with-current-buffer "*Gnosis NEW*"
-    (let ((inhibit-read-only 1))
-      (erase-buffer))
-    (gnosis-edit-mode)
-    (gnosis-export--insert-thema "NEW" type keimenon hypothesis
-				 answer parathema tags example))
-  (search-backward "keimenon")
-  (forward-line))
+  (if (and (member (downcase type) '("model" "model-name" "image-region" "image-occlusion"))
+           (null hypothesis))
+      (pcase (downcase type)
+        ("model" (gnosis-add-model-thema))
+        ("model-name" (gnosis-add-model-name-thema))
+        (image-type (gnosis-add-image-thema image-type)))
+    (when (get-buffer "*Gnosis NEW*")
+      (user-error "Finish or cancel the existing *Gnosis NEW* draft first"))
+    (let ((owner (gnosis--ensure-db)))
+      (window-configuration-to-register :gnosis-edit)
+      (pop-to-buffer "*Gnosis NEW*")
+      (with-current-buffer "*Gnosis NEW*"
+        (let ((inhibit-read-only 1))
+          (erase-buffer))
+        (gnosis-edit-mode)
+        (setq gnosis--draft-db owner)
+        (apply #'gnosis-export--insert-thema "NEW" type keimenon hypothesis
+               answer parathema tags example (when aliases-p (list accepted-aliases))))
+      (when (member (downcase type) '("model" "model-name"))
+        (use-local-map (copy-keymap (current-local-map)))
+        (local-set-key (kbd "C-c C-a") #'gnosis-model-attach))
+      (search-backward "keimenon")
+      (forward-line))))
+
+(defun gnosis--source-thema-round-trip-p (answer parathema)
+  "Return non-nil if ANSWER and PARATHEMA survive the thema Org codec.
+Allow only outer whitespace trimming in ANSWER.  Require exactly one
+basic thema, with no injected fields and an unchanged PARATHEMA."
+  (condition-case nil
+      (with-temp-buffer
+        (delay-mode-hooks (org-mode))
+        (gnosis-export--insert-thema "NEW" "basic" nil nil answer parathema)
+        (let ((themata (gnosis-export-parse-themata)))
+          (and (= (length themata) 1)
+               (equal (butlast (car themata))
+                      (list "NEW" "basic" nil nil
+                            (when answer (list (string-trim answer)))
+                            parathema nil)))))
+    (error nil)))
+
+;;;###autoload
+(defun gnosis-add-thema-from-node ()
+  "Compose a basic thema linked to the Org node at point.
+Use the nearest enclosing ID, including a file-level ID.  Prefill Answer
+with the active region, if any, and leave Keimenon empty.  Put the source
+link in Parathema, which is shown only after answering.
+
+Accept copied text only if the Org codec preserves one Answer and the
+source link, apart from trimming outer answer whitespace.  Reject lossy
+selections such as separator lines, headings, or a leading list marker before
+opening the editor.  Select a plain passage instead, or author structured
+content manually in the editor's supported fields.
+
+Open the ordinary thema editor beside the source.  Save with
+`gnosis-save' or cancel with `gnosis-edit-quit'.  Do not create an ID,
+modify or save the source, or replace an existing creation draft."
+  (interactive)
+  (unless (derived-mode-p 'org-mode)
+    (user-error "Create a thema from an Org buffer with a source ID"))
+  (let ((id (save-restriction
+              (widen)
+              (gnosis-org-get-id)))
+        (answer (when (use-region-p)
+                  (buffer-substring-no-properties
+                   (region-beginning) (region-end))))
+        (display-buffer-overriding-action
+         '((display-buffer-below-selected) (inhibit-same-window . t))))
+    (unless (and id (not (string-empty-p id)))
+      (user-error "No source ID at point or in an enclosing Org node"))
+    (let ((parathema (org-link-make-string (concat "id:" id) "Source")))
+      (unless (gnosis--source-thema-round-trip-p answer parathema)
+        (user-error
+         (concat "Source passage cannot be copied without changing its content; "
+                 "select a plain passage or author structured content manually "
+                 "in the editor's supported fields")))
+      (gnosis-add-thema "basic" nil nil answer parathema))))
 
 (defun gnosis-edit-thema (id)
-  "Edit thema with ID."
-  (window-configuration-to-register :gnosis-edit)
-  (with-current-buffer (pop-to-buffer "*Gnosis Edit*")
-    (let ((inhibit-read-only 1))
-      (erase-buffer))
-    (gnosis-edit-mode)
-    (gnosis-export--insert-themata (list id))
-    (search-backward "keimenon")
-    (forward-line)))
+  "Edit thema with ID without replacing an unfinished edit."
+  (when (and (get-buffer "*Gnosis Edit*")
+             (buffer-modified-p (get-buffer "*Gnosis Edit*")))
+    (user-error "Finish the existing Gnosis edit first"))
+  (let* ((owner (gnosis--ensure-db))
+         (original (gnosis--draft-content owner id)))
+    (unless (car original)
+      (user-error "Thema no longer exists; reopen the collection"))
+    (window-configuration-to-register :gnosis-edit)
+    (pop-to-buffer "*Gnosis Edit*")
+    (with-current-buffer "*Gnosis Edit*"
+      (let ((inhibit-read-only 1))
+        (erase-buffer))
+      (gnosis-edit-mode)
+      (setq gnosis--draft-db owner
+            gnosis--draft-original (cons id original))
+      (gnosis-export--insert-themata (list id))
+      (when (member (gnosis-get 'type 'themata `(= id ,id)) '("model" "model-name"))
+        (use-local-map (copy-keymap (current-local-map)))
+        (local-set-key (kbd "C-c C-a") #'gnosis-model-attach))
+      (search-backward "keimenon")
+      (forward-line))))
 
 (defun gnosis-edit-quit ()
   "Quit recrusive edit & kill current buffer."
@@ -733,6 +962,7 @@ Otherwise, update via `gnosis-update-thema'."
 (defvar-keymap gnosis-edit-mode-map
   :doc "gnosis org mode map"
   "C-c C-c" #'gnosis-save
+  "C-c C-a" #'gnosis-image-attach
   "C-c C-q" #'gnosis-tags-prompt
   "C-c C-o" #'gnosis-nodes-goto-id
   "C-c C-k" #'gnosis-edit-quit)
@@ -748,33 +978,14 @@ Otherwise, update via `gnosis-update-thema'."
 
 (defun gnosis-get-date-total-themata (&optional date)
   "Return total themata reviewed for DATE (YYYYMMDD integer).
-
-If entry for DATE does not exist, it will be created.
-
 Defaults to current date."
-  (let* ((date (or date (gnosis--today-int)))
-	 (date-log (gnosis-select
-		    '[date reviewed-total reviewed-new] 'activity-log
-		    `(= date ,date) t))
-	 (reviewed-total (cadr date-log))
-	 (reviewed-new (or (caddr date-log) 0)))
-    (or reviewed-total
-	(progn
-	  ;; Using reviewed-new instead of hardcoding 0 just to not mess up tests.
-	  (and (= date (gnosis--today-int))
-	       (gnosis--insert-into 'activity-log `([,date 0 ,reviewed-new])))
-	  0))))
+  (nth 1 (gnosis-review-activity (or date (gnosis--today-int)))))
 
 (defun gnosis-get-date-new-themata (&optional date)
   "Return new themata reviewed for DATE (YYYYMMDD integer).
 
 Defaults to current date."
-  (let* ((date (or date (gnosis--today-int)))
-	 (reviewed-new (or (car (gnosis-select 'reviewed-new
-					       'activity-log
-					       `(= date ,date) t))
-			   0)))
-    reviewed-new))
+  (nth 2 (gnosis-review-activity (or date (gnosis--today-int)))))
 (defun gnosis-search-thema (&optional query)
   "Search for thema QUERY.
 
@@ -791,8 +1002,22 @@ Return thema ids for themata that match QUERY."
     (append (gnosis-select 'id 'themata clause-keimenon t)
 	    (gnosis-select 'id 'themata clause-answer t))))
 
+;;;###autoload
+(defun gnosis ()
+  "Open the Gnosis dashboard."
+  (interactive)
+  (gnosis-dashboard))
+
 ;; Gnosis mode ;;
 ;;;;;;;;;;;;;;;;;
+
+(defconst gnosis--modeline-entry
+  '(:eval
+    (if (and gnosis-due-themata-total (> gnosis-due-themata-total 0))
+        (propertize (format " [%d] " gnosis-due-themata-total)
+                    'face 'warning 'gnosis-modeline t)
+      ""))
+  "Owned mode-line form, independent of its current rendered text.")
 
 ;;;###autoload
 (define-minor-mode gnosis-modeline-mode
@@ -800,30 +1025,15 @@ Return thema ids for themata that match QUERY."
   :global t
   :group 'gnosis
   :lighter nil
-  (setq gnosis-due-themata-total (length (gnosis-review-get-due-themata)))
-  (if gnosis-modeline-mode
-      (progn
-        (add-to-list
-         'global-mode-string
-         '(:eval
-           (if (and gnosis-due-themata-total
-                    (> gnosis-due-themata-total 0))
-               (propertize
-                (format " [%d] " gnosis-due-themata-total)
-                'face 'warning
-                'gnosis-modeline t)
-             "")))
-        (force-mode-line-update))
-    (setq global-mode-string
-          (seq-remove
-           (lambda (item)
-             (and (listp item)
-                  (eq (car item) :eval)
-                  (get-text-property
-                   0 'gnosis-modeline
-                   (format "%s" (eval (cadr item))))))
-           global-mode-string))
-    (force-mode-line-update)))
+  (when gnosis-modeline-mode
+    (setq gnosis-due-themata-total (length (gnosis-review-get-due-themata)))
+    ;; The query or a variable watcher may have disabled the mode.
+    (when gnosis-modeline-mode
+      (add-to-list 'global-mode-string gnosis--modeline-entry)))
+  ;; Publication watchers run before assignment and may disable the mode.
+  (unless gnosis-modeline-mode
+    (setq global-mode-string (remove gnosis--modeline-entry global-mode-string)))
+  (force-mode-line-update))
 
 (define-derived-mode gnosis-mode special-mode "Gnosis"
   "Gnosis Mode."

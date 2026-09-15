@@ -8,7 +8,6 @@
 
 ;; Version: 0.0.1
 
-;; Package-Requires: ((emacs "27.2") (compat "29.1.4.2"))
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -32,6 +31,8 @@
 (require 'gnosis-utils)
 
 (defvar gnosis-script-input-method-alist)
+
+(declare-function completion-preview-mode "completion-preview" (&optional arg))
 
 
 (defface gnosis-monkeytype-face-dimmed
@@ -62,10 +63,40 @@
 
 (defvar gnosis-monkeytype-buffer-name "*gnosis-monkeytype*")
 
-(defvar gnosis-monkeytype-string nil)
+(defvar-local gnosis-monkeytype--owned-p nil
+  "Non-nil when this buffer belongs to a typing exercise.")
 
-(defvar gnosis-monkeytype--start-time nil
+(defun gnosis-monkeytype--owned-buffer-p ()
+  "Return non-nil if the current buffer still belongs to a typing exercise."
+  (and gnosis-monkeytype--owned-p
+       (eq major-mode 'gnosis-monkeytype-mode)
+       (not buffer-file-name)))
+
+(defun gnosis-monkeytype--buffer ()
+  "Return the owned typing buffer, refusing unrelated name collisions."
+  (let ((buffer (get-buffer gnosis-monkeytype-buffer-name)))
+    (when (and buffer
+               (not (with-current-buffer buffer
+                      (gnosis-monkeytype--owned-buffer-p))))
+      (user-error "Buffer %s is not a typing exercise; rename it first"
+                  gnosis-monkeytype-buffer-name))
+    (or buffer (generate-new-buffer gnosis-monkeytype-buffer-name))))
+
+(defvar-local gnosis-monkeytype-string nil)
+
+(defvar-local gnosis-monkeytype--start-time nil
   "Time of first keystroke, or nil if not yet started.")
+
+(defun gnosis-monkeytype--thema-content (row)
+  "Return typing text and highlighted answers from thema ROW.
+ROW contains keimenon, type and answers.  Strip described Org links, trim
+answer quotes and append the answer for basic questions without changing ROW."
+  (pcase-let* ((`(,keimenon ,type ,answers) row)
+               (text (replace-regexp-in-string
+                      "\\[\\[\\([^]]+\\)\\]\\[\\([^]]+\\)\\]\\]" "\\2" keimenon))
+               (answers (mapcar #'gnosis-utils-trim-quotes answers)))
+    (list (if (equal type "basic") (concat text "\n" (car answers)) text)
+          answers)))
 
 (defun gnosis-monkeytype--format-text (text)
   "Format TEXT using a temp buffer."
@@ -76,7 +107,7 @@
 
 (defun gnosis-monkeytype--handler (_beg end _len)
   "Handler buffer change at END."
-  (when (and (eq (current-buffer) (get-buffer gnosis-monkeytype-buffer-name))
+  (when (and (gnosis-monkeytype--owned-buffer-p)
 	     (eq this-command 'self-insert-command))
     (unless gnosis-monkeytype--start-time
       (setq gnosis-monkeytype--start-time (current-time)))
@@ -107,6 +138,8 @@
 (defun gnosis-monkeytype-exit ()
   "Exit monkeytyping."
   (interactive nil gnosis-monkeytype-mode)
+  (unless (gnosis-monkeytype--owned-buffer-p)
+    (user-error "This buffer no longer belongs to a typing exercise"))
   (remove-hook 'after-change-functions #'gnosis-monkeytype--handler t)
   (kill-buffer (current-buffer))
   (ignore-errors (throw 'monkeytype-loop t))
@@ -122,18 +155,20 @@ A \"word\" is 5 characters (standard typing test definition)."
 (defun gnosis-monkeytype (text &optional mistakes)
   "Monkeytype TEXT.
 
-Optionally, highlight MISTAKES."
-  (with-current-buffer (get-buffer-create gnosis-monkeytype-buffer-name)
+Optionally, highlight MISTAKES.
+Refuse to replace unrelated buffers named `gnosis-monkeytype-buffer-name'."
+  (with-current-buffer (gnosis-monkeytype--buffer)
     (erase-buffer)
     (let ((text-formatted (gnosis-utils-highlight-words
 			   text mistakes 'gnosis-monkeytype-face-wrong
 			   'gnosis-monkeytype-face-dimmed)))
       (gnosis-monkeytype-mode)
+      (setq gnosis-monkeytype--owned-p t)
       (insert text-formatted)
       (fill-paragraph)
       (setq gnosis-monkeytype-string (buffer-string))
       (setq gnosis-monkeytype--start-time nil)
-      (switch-to-buffer (get-buffer-create gnosis-monkeytype-buffer-name))
+      (switch-to-buffer (current-buffer))
       (goto-char (point-min))
       (add-hook 'after-change-functions #'gnosis-monkeytype--handler nil t)
       (let ((method (alist-get (gnosis-utils-detect-script text)
@@ -159,13 +194,25 @@ Optionally, highlight MISTAKES."
   :parent text-mode-map
   "DEL" #'gnosis-monkeytype--ignore-del
   "RET" #'forward-line
-  "C-c C-k" #'gnosis-monkeytype-exit)
+  "C-c C-k" #'gnosis-monkeytype-exit
+  "<remap> <completion-at-point>" #'ignore
+  "<remap> <complete-symbol>" #'ignore
+  "<remap> <dabbrev-expand>" #'ignore
+  "<remap> <dabbrev-completion>" #'ignore
+  "<remap> <hippie-expand>" #'ignore)
 
 (define-derived-mode gnosis-monkeytype-mode text-mode "Gnosis Monkeytype"
-  "Gnosis Monkeytype Mode."
+  "Gnosis Monkeytype Mode with buffer-local completion disabled."
   :interactive nil
   :lighter " gnosis-monkeytype-mode"
   :keymap gnosis-monkeytype-mode-map
+  :after-hook
+  (progn
+    ;; Parent hooks can add CAPFs; global preview starts after mode hooks.
+    (setq-local completion-at-point-functions nil)
+    (when (and (fboundp 'completion-preview-mode)
+               (bound-and-true-p completion-preview-mode))
+      (completion-preview-mode -1)))
   (setq-local post-self-insert-hook nil)
   (setq-local header-line-format
 	      (substitute-command-keys

@@ -45,10 +45,14 @@
 (defun gnosis-sqlite-open (file)
   "Open SQLite database FILE and return the handle.
 Enables foreign keys and sets a busy timeout."
-  (let ((db (sqlite-open file)))
-    (sqlite-execute db "PRAGMA foreign_keys = ON")
-    (sqlite-execute db "PRAGMA busy_timeout = 5000")
-    db))
+  (let ((db (sqlite-open file)) ready)
+    (unwind-protect
+        (progn
+          (sqlite-execute db "PRAGMA foreign_keys = ON")
+          (sqlite-execute db "PRAGMA busy_timeout = 5000")
+          (setq ready t)
+          db)
+      (unless ready (sqlite-close db)))))
 
 (defun gnosis-sqlite-close (db)
   "Close SQLite database handle DB."
@@ -60,18 +64,40 @@ Enables foreign keys and sets a busy timeout."
 
 ;;; Value encoding (emacsql-compatible)
 
+(defun gnosis-sqlite--serialize (value)
+  "Serialize VALUE as complete Lisp text with deterministic printer settings.
+Unlike SQL parameter encoding, nil and numbers also become strings."
+  (let ((print-length nil)
+        (print-level nil)
+        (print-circle t)
+        (print-continuous-numbering nil)
+        (print-number-table nil)
+        (print-gensym t)
+        (print-quoted t)
+        (print-escape-newlines nil)
+        (print-escape-control-characters nil)
+        (print-escape-nonascii t)
+        (print-escape-multibyte nil)
+        (print-charset-text-property t)
+        (print-symbols-bare nil)
+        (print-integers-as-characters nil)
+        (print-unreadable-function nil)
+        (float-output-format nil))
+    (prin1-to-string value)))
+
 (defun gnosis-sqlite--encode-param (value)
   "Encode VALUE for binding as a SQL parameter.
-nil -> :null, numbers pass through, everything else -> prin1-to-string."
+Nil becomes null, numbers pass through, and other values use
+`gnosis-sqlite--serialize'."
   (cond
    ((null value) nil)
    ((numberp value) value)
-   (t (prin1-to-string value))))
+   (t (gnosis-sqlite--serialize value))))
 
 (defun gnosis-sqlite--decode (value)
   "Decode a single SQL result VALUE to a Lisp object.
-nil -> nil, numbers pass through, empty string -> empty string,
-other strings -> read-from-string (emacsql-compatible)."
+Nil and numbers pass through; empty strings stay empty; other strings use
+`read-from-string' for Emacsql compatibility."
   (cond
    ((null value) nil)
    ((numberp value) value)
@@ -121,34 +147,34 @@ Used internally by `gnosis--insert-into', `gnosis-update', etc."
 
 ;;; Transactions
 
-(defvar gnosis-sqlite--in-transaction nil
-  "Non-nil when inside a `gnosis-sqlite-with-transaction' block.")
+(defvar gnosis-sqlite--transaction-dbs nil
+  "Dynamically bound list of database handles in active transactions.")
 
 (defmacro gnosis-sqlite-with-transaction (db &rest body)
   "Execute BODY inside a transaction on DB.
-Only the outermost invocation issues BEGIN/COMMIT.
-Rolls back on error via `unwind-protect'."
+Only the outermost invocation for each database issues BEGIN/COMMIT.
+Roll back an incomplete outer transaction on any nonlocal exit."
   (declare (indent 1) (debug t))
   (let ((db-sym (gensym "db"))
         (outer-sym (gensym "outer"))
-        (result-sym (gensym "result")))
+        (completed-sym (gensym "completed")))
     `(let* ((,db-sym ,db)
-            (,outer-sym (not gnosis-sqlite--in-transaction))
-            (gnosis-sqlite--in-transaction t)
-            (,result-sym nil))
+            (,outer-sym
+             (not (memq ,db-sym gnosis-sqlite--transaction-dbs)))
+            (gnosis-sqlite--transaction-dbs
+             (cons ,db-sym gnosis-sqlite--transaction-dbs))
+            (,completed-sym nil))
        (when ,outer-sym
          (sqlite-execute ,db-sym "BEGIN IMMEDIATE"))
        (unwind-protect
-           (progn
-             (setq ,result-sym (progn ,@body))
+           (prog1 (progn ,@body)
              (when ,outer-sym
                (sqlite-execute ,db-sym "COMMIT"))
-             ,result-sym)
-         (when (and ,outer-sym
-                    (condition-case nil
-                        (progn (sqlite-execute ,db-sym "ROLLBACK") t)
-                      (error nil)))
-           nil)))))
+             (setq ,completed-sym t))
+         (when (and ,outer-sym (not ,completed-sym))
+           (condition-case nil
+               (sqlite-execute ,db-sym "ROLLBACK")
+             (error nil)))))))
 
 ;;; Batch execution helpers
 
@@ -292,7 +318,7 @@ Supported patterns:
     ;; Subtraction: (- n col)
     (`(- ,(and (pred numberp) n) ,(and (pred symbolp) col))
      (cons (format "%s - %s" n (gnosis-sqlite--ident col)) nil))
-    (_ (error "gnosis-sqlite: unsupported expression: %S" expr))))
+    (_ (error "Gnosis SQLite: unsupported expression: %S" expr))))
 
 ;;; S-expression compiler: columns
 
@@ -304,7 +330,7 @@ SPEC can be a symbol (single column), a vector of symbols, or `*'."
    ((vectorp spec)
     (mapconcat #'gnosis-sqlite--ident (append spec nil) ", "))
    ((symbolp spec) (gnosis-sqlite--ident spec))
-   (t (error "gnosis-sqlite: unsupported column spec: %S" spec))))
+   (t (error "Gnosis SQLite: unsupported column spec: %S" spec))))
 
 ;;; S-expression compiler: schema
 
@@ -332,6 +358,10 @@ COL-SPEC is like (name type :constraint1 :constraint2 ...)."
 (defun gnosis-sqlite--compile-constraint (constraint)
   "Compile a table-level CONSTRAINT to SQL string."
   (pcase constraint
+    (`(:check ,expression)
+     (unless (stringp expression)
+       (error "Gnosis SQLite: CHECK expression must be a string"))
+     (format "CHECK (%s)" expression))
     (`(:unique ,cols)
      (format "UNIQUE (%s)"
              (mapconcat #'gnosis-sqlite--ident
@@ -356,7 +386,7 @@ COL-SPEC is like (name type :constraint1 :constraint2 ...)."
                                 (symbol-name action)
                                 1)))))))))
        sql))
-    (_ (error "gnosis-sqlite: unsupported constraint: %S" constraint))))
+    (_ (error "Gnosis SQLite: unsupported constraint: %S" constraint))))
 
 (defun gnosis-sqlite--compile-schema (schema)
   "Compile emacsql SCHEMA S-expression to SQL column/constraint definitions.

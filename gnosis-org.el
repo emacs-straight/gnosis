@@ -14,6 +14,7 @@
 
 (require 'cl-lib)
 (require 'org-element)
+(require 'subr-x)
 
 (defun gnosis-org-adjust-title (input)
   "Strip org link markup from INPUT, keeping only link descriptions.
@@ -29,28 +30,25 @@ Converts [[id:xxx][Description]] to Description."
     (let ((heading-level (org-current-level))
 	  (id (org-id-get)))
       (cond (id id)
-	    ((and (null id) (= heading-level 1))
+	    ((or (null heading-level) (= heading-level 1))
 	     (goto-char (point-min))
-	     (org-id-get))
+	     (when (org-before-first-heading-p)
+               (org-id-get)))
 	    (t
 	     (outline-up-heading 1 t)
 	     (gnosis-org-get-id))))))
 
-(defun gnosis-org-collect-id-links ()
-  "Collect ID links and current headline ID as (link-id . headline-id) pairs."
-  (let ((links nil)
-        (begin (point-min))
-        (end (point-max)))
-    (save-excursion
-      (goto-char begin)
-      (while (re-search-forward org-link-any-re end t)
-        (let ((link (match-string-no-properties 0)))
-          (when (string-match "id:\\([^]]+\\)" link)
-            (let ((target-id (match-string 1 link))
-                  (source-id (gnosis-org-get-id)))
-              (when (and target-id source-id)
-                (push (cons target-id source-id) links)))))))
-    (nreverse links)))
+(defun gnosis-org-collect-id-links (&optional parsed-data)
+  "Collect ID links as (target-id . source-id) pairs from PARSED-DATA.
+Parse the current buffer when PARSED-DATA is nil.  Each source is the
+nearest enclosing ID at the link's beginning."
+  (save-excursion
+    (org-element-map (or parsed-data (org-element-parse-buffer)) 'link
+      (lambda (link)
+        (when (equal (org-element-property :type link) "id")
+          (goto-char (org-element-property :begin link))
+          (when-let* ((source-id (gnosis-org-get-id)))
+            (cons (org-element-property :path link) source-id)))))))
 
 (defun gnosis-org-get-filetags (&optional parsed-data)
   "Return the filetags of the buffer's PARSED-DATA as a list of strings."
@@ -168,6 +166,23 @@ Extracts their ID, tags, and links."
               headlines)
       headlines)))
 
+(defun gnosis-org-matching-node-ids (query &optional node-ids)
+  "Return node IDs whose own Org content matches QUERY.
+When NODE-IDS is non-nil, return only IDs in that list."
+  (unless (derived-mode-p 'org-mode)
+    (org-mode))
+  (let (matches)
+    (save-excursion
+      (goto-char (point-min))
+      (while (search-forward query nil t)
+        (let ((id (save-excursion
+                    (goto-char (match-beginning 0))
+                    (gnosis-org-get-id))))
+          (when (and id (or (null node-ids) (member id node-ids))
+                     (not (member id matches)))
+            (push id matches)))))
+    (nreverse matches)))
+
 (defun gnosis-org-get-buffer-info ()
   "Parse current buffer for node data, links, and content hash.
 The buffer must already be in `org-mode' or contain raw org text.
@@ -177,8 +192,9 @@ the SHA1 hash of the buffer content."
     (unless (derived-mode-p 'org-mode)
       (org-mode))
     (org-set-regexps-and-options 'tags-only)
-    (let* ((data (gnosis-org-buffer-data))
-	   (links (gnosis-org-collect-id-links)))
+    (let* ((parsed-data (org-element-parse-buffer))
+           (data (gnosis-org-buffer-data parsed-data))
+           (links (gnosis-org-collect-id-links parsed-data)))
       (append data (list links hash)))))
 
 (defun gnosis-org-get-file-info (filename)

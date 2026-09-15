@@ -30,7 +30,8 @@
 (require 'subr-x)
 (require 'vc-git)
 (require 'gnosis-sqlite)
-(require 'gnosis-algorithm)
+(require 'gnosis-logical-day)
+(require 'gnosis-fsrs)
 
 (defcustom gnosis-dir (locate-user-emacs-file "gnosis")
   "Gnosis directory."
@@ -59,7 +60,7 @@ Initialized lazily by `gnosis--ensure-db' on first use.")
 (defvar gnosis-testing nil
   "Change this to non-nil when running manual tests.")
 
-(defconst gnosis-db-version 8
+(defconst gnosis-db-version 9
   "Gnosis database version.")
 
 (defvar gnosis--id-cache nil
@@ -69,17 +70,28 @@ for O(1) lookups instead of querying the database per thema.")
 
 ;;; Connection
 
-(defun gnosis--ensure-db ()
-  "Return the gnosis database connection, opening it if necessary.
-Creates `gnosis-dir' and runs schema initialization on first use."
-  (unless gnosis-db
+(defun gnosis-db--open (directory)
+  "Return a validated database connection for DIRECTORY without publishing it.
+Create DIRECTORY if needed.  Close the candidate on any nonlocal exit."
+  (let ((gnosis-dir (expand-file-name directory)))
     (unless (file-directory-p gnosis-dir)
       (make-directory gnosis-dir))
-    (setq gnosis-db
-	  (gnosis-sqlite-open
-	   (expand-file-name "gnosis.db" gnosis-dir)))
-    (gnosis-db-init))
-  gnosis-db)
+    (let ((candidate (gnosis-sqlite-open
+                      (expand-file-name "gnosis.db" gnosis-dir)))
+          ready)
+      (unwind-protect
+          (progn
+            ;; Recursive query helpers see the candidate only during init.
+            (let ((gnosis-db candidate)) (gnosis-db-init))
+            (setq ready t)
+            candidate)
+        (unless ready (gnosis-sqlite-close candidate))))))
+
+(defun gnosis--ensure-db ()
+  "Return the gnosis database connection, opening it if necessary.
+Create `gnosis-dir' and validate storage before publishing a new connection."
+  (or gnosis-db
+      (setq gnosis-db (gnosis-db--open gnosis-dir))))
 
 ;;; Query wrappers
 
@@ -94,6 +106,20 @@ Optional argument FLATTEN, when non-nil, flattens the result."
 		      cols (gnosis-sqlite--ident table) (car where)))
 	 (output (gnosis-sqlite--select-compiled db sql (cdr where))))
     (if flatten (apply #'append output) output)))
+
+(defun gnosis-db-review-activity (&optional db)
+  "Return (DATE REVIEWED-TOTAL REVIEWED-NEW) activity rows from DB."
+  (gnosis-sqlite-select
+   (or db (gnosis--ensure-db))
+   "SELECT date, SUM(reviewed_total), SUM(reviewed_new)
+      FROM
+        (SELECT date, reviewed_total, reviewed_new
+           FROM review_activity_baseline
+         UNION ALL
+         SELECT review_day, COUNT(*), SUM(new_p)
+           FROM review_events WHERE event_id NOT IN (SELECT event_id FROM review_voids)
+           GROUP BY review_day)
+     GROUP BY date ORDER BY date"))
 
 (defun gnosis-table-exists-p (table)
   "Check if TABLE exists."
@@ -124,11 +150,19 @@ Optional argument FLATTEN, when non-nil, flattens the result."
 (defun gnosis--insert-into (table values &optional or-ignore)
   "Insert VALUES to TABLE.
 When OR-IGNORE is non-nil, use INSERT OR IGNORE to silently skip
-rows that violate a UNIQUE constraint."
-  (let* ((compiled (gnosis-sqlite--compile-values values))
-	 (sql (format "INSERT%s INTO %s VALUES %s"
+rows that violate a UNIQUE constraint.
+Historical six-field thema rows name their original columns in schema 9;
+new metadata keeps its default, including on retained archive layouts."
+  (let* ((rows (if (vectorp values) (list values) values))
+         (columns (if (and (eq table 'themata) rows
+                           (seq-every-p (lambda (row) (and (vectorp row) (= (length row) 6))) rows)
+                           (>= (gnosis--db-version) 9))
+                      " (id, type, keimenon, hypothesis, answer, source_guid)" ""))
+         (compiled (gnosis-sqlite--compile-values values))
+	 (sql (format "INSERT%s INTO %s%s VALUES %s"
 		      (if or-ignore " OR IGNORE" "")
-		      (gnosis-sqlite--ident table) (car compiled))))
+		      (gnosis-sqlite--ident table)
+                      columns (car compiled))))
     (gnosis-sqlite--execute-compiled (gnosis--ensure-db) sql (cdr compiled))))
 
 (defun gnosis-update (table value where)
@@ -173,8 +207,8 @@ Example:
 
 (defun gnosis--today-int ()
   "Return today as a YYYYMMDD integer.
-Respects `gnosis-algorithm-day-start-hour'."
-  (gnosis--date-to-int (gnosis-algorithm-date)))
+Respects `gnosis-day-start-hour'."
+  (gnosis--date-to-int (gnosis-date)))
 
 ;;; ID generation
 
@@ -200,21 +234,9 @@ LENGTH: length of id, default to 18."
 
 (defun gnosis-generate-ids (n &optional length)
   "Generate N unique gnosis IDs as a list.
+Each ID has optional LENGTH, defaulting to 18 digits.
 Uses `gnosis--id-cache' for O(1) collision checking when bound."
-  (let ((ids nil) (count 0))
-    (while (< count n)
-      (let* ((len (or length 18))
-             (max-val (expt 10 len))
-             (min-val (expt 10 (1- len)))
-             (id (+ (random (- max-val min-val)) min-val))
-             (exists (if gnosis--id-cache
-                         (gethash id gnosis--id-cache)
-                       (gnosis-select 'id 'themata `(= id ,id) t))))
-        (unless exists
-          (when gnosis--id-cache (puthash id t gnosis--id-cache))
-          (push id ids)
-          (cl-incf count))))
-    (nreverse ids)))
+  (cl-loop repeat n collect (gnosis-generate-id length)))
 
 ;;; Schema
 
@@ -225,29 +247,114 @@ Uses `gnosis--id-cache' for O(1) collision checking when bound."
        (keimenon text :not-null)
        (hypothesis text :not-null)
        (answer text :not-null)
-       (source-guid text)]))
-    (review
-     ([(id integer :primary-key :not-null) ;; thema-id
-       (gnosis integer :not-null)
-       (amnesia integer :not-null)]
-      (:foreign-key [id] :references themata [id]
-		    :on-delete :cascade)))
-    (review-log
-     ([(id integer :primary-key :not-null) ;; thema-id
-       (last-rev integer :not-null)  ;; Last review date
-       (next-rev integer :not-null)  ;; Next review date
-       (c-success integer :not-null) ;; Consecutive successful reviews
-       (t-success integer :not-null) ;; Total successful reviews
-       (c-fails integer :not-null)   ;; Consecutive failed reviewss
-       (t-fails integer :not-null)   ;; Total failed reviews
-       (suspend integer :not-null)   ;; Binary value, 1=suspended
-       (n integer :not-null)]        ;; Number of reviews
-      (:foreign-key [id] :references themata [id]
-		    :on-delete :cascade)))
-    (activity-log
-     ([(date integer :not-null)
+       (source-guid text)
+       (accepted-aliases text)]))
+    (scheduler-config
+     ([(id integer :primary-key :not-null)
+       (algorithm text :not-null)
+       (model text :not-null)
+       (implementation text :not-null)
+       (desired-retention real :not-null)
+       (parameters text :not-null)]))
+    (scheduler-baseline
+     ([(thema-id integer :primary-key :not-null)
+       (due-day integer :not-null)
+       (reps integer :not-null)
+       (lapses integer :not-null)]
+      (:foreign-key [thema-id] :references themata [id]
+                    :on-delete :cascade)))
+    (scheduler-state
+     ([(thema-id integer :primary-key :not-null)
+       (config-id integer :not-null)
+       (stability real)
+       (difficulty real)
+       (last-reviewed-at-us integer)
+       (last-review-day integer)
+       (due-day integer :not-null)
+       (reps integer :not-null)
+       (lapses integer :not-null)
+       (suspended integer :not-null)]
+      (:foreign-key [thema-id] :references scheduler-baseline [thema-id]
+                    :on-delete :cascade)
+      (:foreign-key [config-id] :references scheduler-config [id])))
+    (review-events
+     ([(event-id text :primary-key :not-null)
+       (thema-id integer :not-null)
+       (config-id integer :not-null)
+       (reviewed-at-us integer :not-null)
+       (review-day integer :not-null)
+       (rating integer :not-null)
+       (elapsed-days integer :not-null)
+       (prior-stability real)
+       (prior-difficulty real)
+       (stability real :not-null)
+       (difficulty real :not-null)
+       (raw-interval-days real :not-null)
+       (calendar-interval-days integer :not-null)
+       (due-day integer :not-null)
+       (reps-before integer :not-null)
+       (reps-after integer :not-null)
+       (lapses-before integer :not-null)
+       (lapses-after integer :not-null)
+       (new-p integer :not-null)]
+      (:foreign-key [thema-id] :references scheduler-baseline [thema-id]
+                    :on-delete :cascade)
+      (:foreign-key [config-id] :references scheduler-config [id])
+      (:check "rating IN (1, 3)")
+      (:check "elapsed_days >= 0")
+      (:check "(prior_stability IS NULL) = (prior_difficulty IS NULL)")
+      (:check "stability > 0")
+      (:check "difficulty BETWEEN 1 AND 10")
+      (:check "raw_interval_days >= 0")
+      (:check "calendar_interval_days >= 1")
+      (:check "reps_before >= 0 AND reps_after = reps_before + 1")
+      (:check "lapses_before >= 0")
+      (:check "lapses_after = lapses_before + CASE rating WHEN 1 THEN 1 ELSE 0 END")
+      (:check "new_p IN (0, 1)")
+      (:check "new_p = CASE reps_before WHEN 0 THEN 1 ELSE 0 END")))
+    (study-history
+     ([(session-id text :primary-key :not-null)
+       (data text :not-null)]))
+    (study-session
+     ([(id integer :primary-key :not-null)
+       (data text :not-null)]
+      (:check "id = 1")))
+    (scheduler-active
+     ([(id integer :primary-key :not-null)
+       (config-id integer :not-null)]
+      (:check "id = 1")
+      (:foreign-key [config-id] :references scheduler-config [id])))
+    (review-voids
+     ([(correction-id text :primary-key :not-null)
+       (event-id text :not-null)]
+      (:unique [event-id])
+      (:foreign-key [event-id] :references review-events [event-id]
+                    :on-delete :cascade)))
+    (practice-voids
+     ([(correction-id text :primary-key :not-null)
+       (event-id text :not-null)]
+      (:unique [event-id])
+      (:foreign-key [event-id] :references practice-events [event-id]
+                    :on-delete :cascade)))
+    (practice-events
+     ([(event-id text :primary-key :not-null)
+       (thema-id integer :not-null)
+       (session-id text :not-null)
+       (attempt integer :not-null)
+       (reviewed-at-us integer :not-null)
+       (rating integer :not-null)]
+      (:foreign-key [thema-id] :references themata [id]
+                    :on-delete :cascade)
+      (:unique [session-id attempt])
+      (:check "attempt > 0")
+      (:check "reviewed_at_us > 0")
+      (:check "rating IN (1, 3)")))
+    (review-activity-baseline
+     ([(date integer :primary-key :not-null)
        (reviewed-total integer :not-null)
-       (reviewed-new integer :not-null)]))
+       (reviewed-new integer :not-null)]
+      (:check "reviewed_total >= 0")
+      (:check "reviewed_new BETWEEN 0 AND reviewed_total")))
     (extras
      ([(id integer :primary-key :not-null)
        (parathema string)
@@ -298,6 +405,100 @@ Uses `gnosis--id-cache' for O(1) collision checking when bound."
 
 ;;; Table creation
 
+(defun gnosis-db--install-default-scheduler-config (db)
+  "Install the pinned default scheduler configuration into DB."
+  (gnosis-sqlite-execute
+   db
+   "INSERT INTO scheduler_config
+      (id, algorithm, model, implementation, desired_retention, parameters)
+    VALUES (?, ?, ?, ?, ?, ?)"
+   (list 1 gnosis-fsrs--algorithm gnosis-fsrs--model
+         gnosis-fsrs--implementation
+         gnosis-fsrs-default-retention
+         gnosis-fsrs-default-parameters)))
+
+(defconst gnosis-db--scheduler-guards
+  '("CREATE TRIGGER scheduler_config_no_replace
+        BEFORE INSERT ON scheduler_config
+        WHEN EXISTS (SELECT 1 FROM scheduler_config WHERE id = NEW.id)
+        BEGIN
+          SELECT RAISE(ABORT, 'scheduler config already exists');
+        END"
+    "CREATE TRIGGER scheduler_config_no_update
+        BEFORE UPDATE ON scheduler_config
+        BEGIN
+          SELECT RAISE(ABORT, 'scheduler config is immutable');
+        END"
+    "CREATE TRIGGER scheduler_config_no_delete
+        BEFORE DELETE ON scheduler_config
+        BEGIN
+          SELECT RAISE(ABORT, 'scheduler config is immutable');
+        END"
+    "CREATE TRIGGER scheduler_baseline_no_replace
+        BEFORE INSERT ON scheduler_baseline
+        WHEN EXISTS
+          (SELECT 1 FROM scheduler_baseline
+             WHERE thema_id = NEW.thema_id)
+        BEGIN
+          SELECT RAISE(ABORT, 'scheduler baseline already exists');
+        END"
+    "CREATE TRIGGER scheduler_baseline_no_update
+        BEFORE UPDATE ON scheduler_baseline
+        BEGIN
+          SELECT RAISE(ABORT, 'scheduler baseline is immutable');
+        END"
+    "CREATE TRIGGER review_events_no_replace
+        BEFORE INSERT ON review_events
+        WHEN EXISTS
+          (SELECT 1 FROM review_events WHERE event_id = NEW.event_id)
+        BEGIN
+          SELECT RAISE(ABORT, 'review event already exists');
+        END"
+    "CREATE TRIGGER review_activity_baseline_no_replace
+        BEFORE INSERT ON review_activity_baseline
+        WHEN EXISTS
+          (SELECT 1 FROM review_activity_baseline WHERE date = NEW.date)
+        BEGIN
+          SELECT RAISE(ABORT, 'review activity baseline already exists');
+        END"
+    "CREATE TRIGGER review_activity_baseline_no_update
+        BEFORE UPDATE ON review_activity_baseline
+        BEGIN
+          SELECT RAISE(ABORT, 'review activity baseline is immutable');
+        END"
+    "CREATE TRIGGER review_activity_baseline_no_delete
+        BEFORE DELETE ON review_activity_baseline
+        BEGIN
+          SELECT RAISE(ABORT, 'review activity baseline is immutable');
+        END"
+    "CREATE TRIGGER scheduler_baseline_no_direct_delete
+        BEFORE DELETE ON scheduler_baseline
+        WHEN EXISTS (SELECT 1 FROM themata WHERE id = OLD.thema_id)
+        BEGIN
+          SELECT RAISE(ABORT, 'scheduler baseline requires hard thema deletion');
+        END"
+    "CREATE TRIGGER review_events_no_update
+        BEFORE UPDATE ON review_events
+        BEGIN
+          SELECT RAISE(ABORT, 'review events are immutable');
+        END"
+    "CREATE TRIGGER review_events_no_direct_delete
+        BEFORE DELETE ON review_events
+        WHEN EXISTS
+          (SELECT 1 FROM scheduler_baseline
+             WHERE thema_id = OLD.thema_id)
+        BEGIN
+          SELECT RAISE(ABORT, 'review events require hard thema deletion');
+        END")
+  "Supported scheduler evidence guards, shared by creation and validation.")
+
+(defun gnosis-db--create-scheduler-guards (db)
+  "Create append-only review-event guards on DB when available."
+  (when (gnosis-table-exists-p 'review-events)
+    (dolist (sql gnosis-db--scheduler-guards)
+      (gnosis-sqlite-execute
+       db (string-replace "CREATE TRIGGER " "CREATE TRIGGER IF NOT EXISTS " sql)))))
+
 (defun gnosis--db-version ()
   "Return the current user_version pragma from the database."
   (caar (gnosis-sqlite-select (gnosis--ensure-db) "PRAGMA user_version")))
@@ -317,14 +518,16 @@ Used for fresh databases only."
 			       (format "CREATE TABLE %s (%s)"
 				       (gnosis-sqlite--ident table)
 				       (gnosis-sqlite--compile-schema schema))))
+      (gnosis-db--install-default-scheduler-config db)
+      (gnosis-sqlite-execute db "INSERT INTO scheduler_active VALUES (1, 1)")
+      (gnosis-db--create-study-guards db)
       (gnosis--db-create-indexes db)
+      (gnosis-db--create-scheduler-guards db)
       (gnosis--db-set-version gnosis-db-version))))
 
 (defun gnosis--db-create-indexes (db)
   "Create all performance indexes on DB."
-  (dolist (stmt '("CREATE INDEX IF NOT EXISTS idx_review_log_due
-                   ON review_log(n, suspend, next_rev)"
-		  "CREATE INDEX IF NOT EXISTS idx_thema_tag_thema_id
+  (dolist (stmt '("CREATE INDEX IF NOT EXISTS idx_thema_tag_thema_id
                    ON thema_tag(thema_id)"
 		  "CREATE INDEX IF NOT EXISTS idx_thema_tag_tag
                    ON thema_tag(tag)"
@@ -336,13 +539,25 @@ Used for fresh databases only."
                    ON node_links(source)"
 		  "CREATE INDEX IF NOT EXISTS idx_node_links_dest
                    ON node_links(dest)"
-		  "CREATE INDEX IF NOT EXISTS idx_activity_log_date
-                   ON activity_log(date)"
 		  "CREATE INDEX IF NOT EXISTS idx_nodes_file
                    ON nodes(file)"
 		  "CREATE INDEX IF NOT EXISTS idx_journal_file
                    ON journal(file)"))
     (gnosis-sqlite-execute db stmt))
+  (when (gnosis-table-exists-p 'scheduler-state)
+    (gnosis-sqlite-execute
+     db
+     "CREATE INDEX IF NOT EXISTS idx_scheduler_state_due
+        ON scheduler_state(suspended, due_day, reps)"))
+  (when (gnosis-table-exists-p 'review-events)
+    (gnosis-sqlite-execute
+     db
+     "CREATE INDEX IF NOT EXISTS idx_review_events_replay
+        ON review_events(thema_id, reviewed_at_us, event_id)")
+    (gnosis-sqlite-execute
+     db
+     "CREATE INDEX IF NOT EXISTS idx_review_events_day
+        ON review_events(review_day)"))
   ;; source_guid index: created by v8 migration for existing DBs,
   ;; or here for fresh DBs where the column already exists
   (gnosis-db--migrate-step "create source_guid index"
@@ -357,323 +572,96 @@ Used for fresh databases only."
 
 ;;; Migrations
 
-(defun gnosis--migrate-make-list (column)
-  "Make COLUMN values into a list."
-  (let ((col-name (gnosis-sqlite--ident column))
-	(results (gnosis-select `[id ,column] 'themata)))
-    (dolist (row results)
-      (let ((id (car row))
-            (old-value (cadr row)))
-	(unless (listp old-value)
-	  (gnosis-sqlite-execute (gnosis--ensure-db)
-				 (format "UPDATE themata SET %s = ? WHERE id = ?" col-name)
-				 (list (list old-value) id)))))))
-
-(defun gnosis-db--migrate-v1 ()
-  "Migration v1: rename notes table to themata."
-  (gnosis-sqlite-execute (gnosis--ensure-db) "ALTER TABLE notes RENAME TO themata")
-  (gnosis--db-set-version 1))
-
-(defun gnosis--migrate-get-tags-from-column ()
-  "Read unique tags from the serialized themata.tags column.
-Used by migrations that run before the thema-tag junction table exists."
-  (cl-loop for tags in (apply 'append
-			      (gnosis-sqlite-select (gnosis--ensure-db)
-						    "SELECT DISTINCT tags FROM themata"))
-	   nconc tags into all-tags
-	   finally return (delete-dups all-tags)))
-
-(defun gnosis-db--migrate-v2 ()
-  "Migration v2: add deck algorithm columns and activity log."
-  (let ((db (gnosis--ensure-db)))
-    (gnosis-sqlite-execute db "ALTER TABLE decks ADD COLUMN failure_factor FLOAT")
-    (gnosis-sqlite-execute db "ALTER TABLE decks ADD COLUMN ef_increase FLOAT")
-    (gnosis-sqlite-execute db "ALTER TABLE decks ADD COLUMN ef_decrease FLOAT")
-    (gnosis-sqlite-execute db "ALTER TABLE decks ADD COLUMN ef_threshold INTEGER")
-    (gnosis-sqlite-execute db "ALTER TABLE decks ADD COLUMN initial_interval TEXT")
-    (gnosis-sqlite-execute db
-			   "CREATE TABLE IF NOT EXISTS activity_log (
-         date TEXT NOT NULL, reviewed_total INTEGER NOT NULL, reviewed_new INTEGER NOT NULL)"))
-  (gnosis--db-set-version 2))
-
-(defun gnosis-db--migrate-v3 ()
-  "Migration v3: drop deck columns, rename review columns."
-  (let ((db (gnosis--ensure-db)))
-    (gnosis-sqlite-execute db "ALTER TABLE decks DROP COLUMN failure_factor")
-    (gnosis-sqlite-execute db "ALTER TABLE decks DROP COLUMN ef_increase")
-    (gnosis-sqlite-execute db "ALTER TABLE decks DROP COLUMN ef_decrease")
-    (gnosis-sqlite-execute db "ALTER TABLE decks DROP COLUMN ef_threshold")
-    (gnosis-sqlite-execute db "ALTER TABLE decks DROP COLUMN initial_interval")
-    (gnosis-sqlite-execute db "ALTER TABLE review RENAME COLUMN ef TO gnosis")
-    (gnosis-sqlite-execute db "ALTER TABLE review RENAME COLUMN ff TO amnesia")
-    (gnosis-sqlite-execute db "ALTER TABLE review DROP COLUMN interval")
-    (gnosis-sqlite-execute db
-			   "CREATE TABLE IF NOT EXISTS activity_log (
-         date TEXT NOT NULL, reviewed_total INTEGER NOT NULL, reviewed_new INTEGER NOT NULL)"))
-  (gnosis--db-set-version 3))
-
-(defun gnosis-db--migrate-v4 ()
-  "Migration v4: column renames, tags/links tables, data conversions."
-  (let ((db (gnosis--ensure-db)))
-    ;; 1. Rename notes -> themata (no-op if v1 already did it)
-    (gnosis-db--migrate-step "v4: rename notes to themata"
-			     (gnosis-sqlite-execute db "ALTER TABLE notes RENAME TO themata"))
-    ;; 2. Create tags and links tables (v5 will rename them)
-    (gnosis-sqlite-execute db
-			   "CREATE TABLE IF NOT EXISTS tags (tag text PRIMARY KEY, UNIQUE (tag))")
-    (gnosis-sqlite-execute db
-			   "CREATE TABLE IF NOT EXISTS links (source integer, dest text,
-         FOREIGN KEY (source) REFERENCES themata (id) ON DELETE CASCADE,
-         UNIQUE (source, dest))")
-    ;; 3. Populate tags from serialized themata.tags column
-    (let ((tags (gnosis--migrate-get-tags-from-column)))
-      (cl-loop for tag in tags
-               do (gnosis-sqlite-execute db
-					 "INSERT OR IGNORE INTO tags VALUES (?)" (list tag))))
-    ;; 4. Column renames
-    (gnosis-sqlite-execute db "ALTER TABLE themata RENAME COLUMN main TO keimenon")
-    (gnosis-sqlite-execute db "ALTER TABLE themata RENAME COLUMN options TO hypothesis")
-    (gnosis-sqlite-execute db "ALTER TABLE extras RENAME COLUMN extra_notes TO parathema")
-    (gnosis-sqlite-execute db "ALTER TABLE extras RENAME COLUMN images TO review_image")
-    (gnosis-sqlite-execute db "ALTER TABLE extras DROP COLUMN extra_image")
-    ;; 5. Make sure all hypothesis & answer values are lists
-    (gnosis--migrate-make-list 'hypothesis)
-    (gnosis--migrate-make-list 'answer)
-    ;; 6. Fix MCQ integer answers
-    (cl-loop for thema in (gnosis-select 'id 'themata '(= type "mcq") t)
-             do (let* ((data (gnosis-select '[hypothesis answer] 'themata
-					    `(= id ,thema) t))
-                       (hypothesis (nth 0 data))
-                       (old-answer (car (nth 1 data)))
-                       (new-answer
-			(when (integerp old-answer)
-			  (list (nth (1- old-answer)
-				     hypothesis)))))
-                  (when (integerp old-answer)
-                    (gnosis-update 'themata `(= answer ',new-answer)
-                                   `(= id ,thema)))))
-    ;; 7. Replace y-or-n with MCQ
-    (cl-loop for thema in (gnosis-select 'id 'themata '(= type "y-or-n") t)
-             do (let ((data (gnosis-select '[type hypothesis answer]
-					   'themata `(= id ,thema) t)))
-                  (when (string= (nth 0 data) "y-or-n")
-                    (gnosis-update 'themata '(= type "mcq") `(= id ,thema))
-                    (gnosis-update 'themata '(= hypothesis '("Yes" "No"))
-                                   `(= id ,thema))
-                    (if (= (car (nth 2 data)) 121)
-                        (gnosis-update 'themata '(= answer '("Yes"))
-                                       `(= id ,thema))
-                      (gnosis-update 'themata '(= answer '("No"))
-                                     `(= id ,thema))))))
-    ;; 8. Replace - with _ in tags (org does not support tags with dash)
-    (cl-loop for tag in (gnosis--migrate-get-tags-from-column)
-             if (string-match-p "-" tag)
-             do (let ((new-tag (replace-regexp-in-string "-" "_" tag)))
-                  (cl-loop
-		   for thema in
-		   (gnosis-select
-		    'id 'themata
-		    `(like tags
-			   ',(format "%%\"%s\"%%" tag))
-		    t)
-		   do (let* ((tags-val
-			      (car (gnosis-select
-				    '[tags] 'themata
-				    `(= id ,thema) t)))
-			     (new-tags
-			      (cl-substitute
-			       new-tag tag tags-val
-			       :test #'string-equal)))
-			(gnosis-update
-			 'themata
-			 `(= tags ',new-tags)
-			 `(= id ,thema))))
-                  (gnosis-sqlite-execute
-		   db "DELETE FROM tags")
-                  (cl-loop
-		   for tag-item in
-		   (gnosis--migrate-get-tags-from-column)
-		   do (gnosis-sqlite-execute
-		       db
-		       "INSERT OR IGNORE INTO tags VALUES (?)"
-		       (list tag-item))))))
-  (gnosis--db-set-version 4))
-
-(defun gnosis-db--migrate-v5 ()
-  "Migration v5: rename notes table to themata."
-  (gnosis-db--migrate-step "v5: rename notes to themata"
-			   (gnosis-sqlite-execute (gnosis--ensure-db) "ALTER TABLE notes RENAME TO themata"))
-  (gnosis--db-set-version 5))
-
-(defun gnosis-db--migrate-v6 ()
-  "Migration v6: merge org-gnosis tables, rename links/tags."
-  (let ((db (gnosis--ensure-db)))
-    ;; 0. Move deck names into thema tags, then drop decks
-    (condition-case err
-	(let ((rows (gnosis-sqlite-select db
-					  "SELECT t.id, t.tags, d.name
-                     FROM themata t JOIN decks d ON t.deck_id = d.id")))
-	  (dolist (row rows)
-	    (let* ((thema-id (nth 0 row))
-		   (tags (nth 1 row))
-		   (deck-name (nth 2 row))
-		   (new-tags (if (listp tags)
-				 (append tags (list deck-name))
-			       (list tags deck-name))))
-	      (gnosis-sqlite-execute db
-				     "UPDATE themata SET tags = ? WHERE id = ?"
-				     (list new-tags thema-id)))))
-      (error
-       (display-warning 'gnosis
-			(format "Migration: v6 deck-to-tag: %s"
-				(error-message-string err))
-			:warning)))
-    (gnosis-db--migrate-step "v6: drop deck_id column"
-			     (gnosis-sqlite-execute db "ALTER TABLE themata DROP COLUMN deck_id"))
-    (gnosis-sqlite-execute db "DROP TABLE IF EXISTS decks")
-    ;; 1. Rename existing tables (idempotent for PRAGMA 5 users)
-    (gnosis-db--migrate-step "v6: rename links to thema_links"
-			     (gnosis-sqlite-execute db "ALTER TABLE links RENAME TO thema_links"))
-    (gnosis-db--migrate-step "v6: rename tags to thema_tags"
-			     (gnosis-sqlite-execute db "ALTER TABLE tags RENAME TO thema_tags"))
-    ;; 2. Create thema-tag junction table & populate from themata.tags
-    (let ((schema (cadr (assq 'thema-tag gnosis-db--schemata))))
-      (gnosis-sqlite-execute db
-			     (format "CREATE TABLE IF NOT EXISTS %s (%s)"
-				     (gnosis-sqlite--ident 'thema-tag)
-				     (gnosis-sqlite--compile-schema schema))))
-    (let ((rows (gnosis-sqlite-select db "SELECT id, tags FROM themata")))
-      (dolist (row rows)
-	(let ((thema-id (car row))
-	      (tags (cadr row)))
-	  (when (listp tags)
-	    (dolist (tag tags)
-	      (condition-case err
-		  (gnosis-sqlite-execute db
-					 "INSERT OR IGNORE INTO thema_tag (thema_id, tag) VALUES (?, ?)"
-					 (list thema-id tag))
-		(error
-		 (display-warning 'gnosis
-				  (format "Migration: v6 tag insert (%s/%s): %s"
-					  thema-id tag
-					  (error-message-string err))
-				  :warning))))))))
-    ;; Drop serialized tags column (now replaced by thema-tag junction table)
-    (gnosis-db--migrate-step "v6: drop themata.tags column"
-			     (gnosis-sqlite-execute db "ALTER TABLE themata DROP COLUMN tags"))
-    ;; Drop thema-tags and node-tags lookup tables
-    (gnosis-sqlite-execute db "DROP TABLE IF EXISTS thema_tags")
-    (gnosis-sqlite-execute db "DROP TABLE IF EXISTS node_tags")
-    ;; 3. Create node tables
-    (dolist (table '(nodes journal node-tag node-links))
-      (let ((schema (cadr (assq table gnosis-db--schemata))))
-	(gnosis-sqlite-execute db
-			       (format "CREATE TABLE IF NOT EXISTS %s (%s)"
-				       (gnosis-sqlite--ident table)
-				       (gnosis-sqlite--compile-schema schema)))))
-    ;; 3. Create indexes
-    (gnosis-sqlite-execute db
-			   "CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes (file)")
-    (gnosis-sqlite-execute db
-			   "CREATE INDEX IF NOT EXISTS idx_journal_file ON journal (file)")
-    ;; 4. Import from org-gnosis.db if it exists
-    (let ((org-db-file (locate-user-emacs-file "org-gnosis.db")))
-      (when (file-exists-p org-db-file)
-	(gnosis-sqlite-execute db
-			       (format "ATTACH DATABASE '%s' AS org_gnosis"
-				       (expand-file-name org-db-file)))
-	(dolist (stmt '(("nodes"
-			 "INSERT OR IGNORE INTO nodes SELECT * FROM org_gnosis.nodes")
-			("journal"
-			 "INSERT OR IGNORE INTO journal SELECT * FROM org_gnosis.journal")
-			("node_tag"
-			 "INSERT OR IGNORE INTO node_tag SELECT * FROM org_gnosis.node_tag")
-			("node_links"
-			 "INSERT OR IGNORE INTO node_links SELECT * FROM org_gnosis.links")))
-	  (condition-case err
-	      (gnosis-sqlite-execute db (cadr stmt))
-	    (error
-	     (display-warning 'gnosis
-			      (format "Migration: v6 org-gnosis import %s: %s"
-				      (car stmt)
-				      (error-message-string err))
-			      :warning))))
-	(gnosis-sqlite-execute db "DETACH DATABASE org_gnosis")
-	(message "Imported org-gnosis data into unified database"))))
-  (gnosis--db-set-version 6))
-
-(defun gnosis--migrate-date-to-int (value)
-  "Convert VALUE to YYYYMMDD integer for migration.
-Handles both Lisp list dates and already-converted integers."
-  (cond
-   ((integerp value) value)
-   ((and (listp value) (= (length value) 3))
-    (gnosis--date-to-int value))
-   ((null value) nil)
-   (t (warn "gnosis: unexpected date value during migration: %S" value)
-      nil)))
-
-(defun gnosis-db--migrate-v7 ()
-  "Migration v7: convert date columns from Lisp lists to YYYYMMDD integers."
-  (let ((db (gnosis--ensure-db)))
+(defun gnosis-db--migrate-v9 ()
+  "Upgrade released schema 8 directly to the complete schema 9."
+  (unless (= 8 (gnosis--db-version))
+    (error "Only released Gnosis schema 8 can be migrated"))
+  (gnosis-db--check-schema (gnosis--ensure-db) 8)
+  (let ((db (gnosis--ensure-db))
+        (tables '(scheduler-config scheduler-baseline scheduler-state
+                  review-events review-activity-baseline practice-events
+                  study-session scheduler-active review-voids practice-voids
+                  study-history)))
     (gnosis-sqlite-with-transaction db
-      ;; 1. Convert review_log.last_rev and next_rev
-      (dolist (row (gnosis-sqlite-select db
-					 "SELECT id, last_rev, next_rev FROM review_log"))
-        (let ((new-last (gnosis--migrate-date-to-int (nth 1 row)))
-              (new-next (gnosis--migrate-date-to-int (nth 2 row))))
-          (when (and new-last new-next
-                     (or (not (equal (nth 1 row) new-last))
-                         (not (equal (nth 2 row) new-next))))
-            (gnosis-sqlite-execute db
-				   "UPDATE review_log SET last_rev = ?, next_rev = ? WHERE id = ?"
-				   (list new-last new-next (nth 0 row))))))
-      ;; 2. Convert activity_log.date
-      (dolist (row (gnosis-sqlite-select db
-					 "SELECT rowid, date FROM activity_log"))
-        (let ((new-date (gnosis--migrate-date-to-int (nth 1 row))))
-          (when (and new-date (not (equal (nth 1 row) new-date)))
-            (gnosis-sqlite-execute db
-				   "UPDATE activity_log SET date = ? WHERE rowid = ?"
-				   (list new-date (nth 0 row))))))
-      ;; 3. Create indexes
-      (gnosis--db-create-indexes db)))
-  (gnosis--db-set-version 7))
+      (dolist (table tables)
+        (let ((schema (cadr (assq table gnosis-db--schemata))))
+          (gnosis-sqlite-execute
+           db (format "CREATE TABLE %s (%s)"
+                      (gnosis-sqlite--ident table)
+                      (gnosis-sqlite--compile-schema schema)))))
+      (gnosis-sqlite-execute db "ALTER TABLE themata ADD COLUMN accepted_aliases TEXT")
+      (gnosis-db--install-default-scheduler-config db)
+      (gnosis-sqlite-execute db "INSERT INTO scheduler_active VALUES (1, 1)")
+      (gnosis-db--create-study-guards db)
+      (when (> (caar (gnosis-sqlite-select
+                      db
+                      "SELECT COUNT(*) FROM themata AS t
+                         LEFT JOIN review_log AS r ON r.id = t.id
+                        WHERE r.id IS NULL"))
+               0)
+        (error "Gnosis: v8 thema lacks scheduler history"))
+      (gnosis-sqlite-execute
+       db
+       "INSERT INTO scheduler_baseline (thema_id, due_day, reps, lapses)
+        SELECT id, next_rev, n, t_fails FROM review_log")
+      (gnosis-sqlite-execute
+       db
+       "INSERT INTO scheduler_state
+          (thema_id, config_id, stability, difficulty,
+           last_reviewed_at_us, last_review_day, due_day,
+           reps, lapses, suspended)
+        SELECT id, 1, NULL, NULL, NULL, NULL, next_rev, n, t_fails, suspend
+          FROM review_log")
+      (gnosis-sqlite-execute
+       db
+       "INSERT INTO review_activity_baseline
+          (date, reviewed_total, reviewed_new)
+        SELECT date, SUM(reviewed_total), SUM(reviewed_new)
+          FROM activity_log GROUP BY date")
+      (dolist (table '(review review-log activity-log))
+        (gnosis-sqlite-execute
+         db (format "DROP TABLE %s" (gnosis-sqlite--ident table))))
+      (gnosis--db-create-indexes db)
+      (gnosis-db--create-scheduler-guards db)
+      (gnosis--db-set-version 9))))
 
-(defun gnosis-db--migrate-v8 ()
-  "Add source_guid column to themata for Anki GUID-based dedup."
-  (let ((db (gnosis--ensure-db)))
-    (gnosis-sqlite-execute db
-			   "ALTER TABLE themata ADD COLUMN source_guid TEXT")
-    (gnosis-sqlite-execute db
-			   "CREATE INDEX IF NOT EXISTS idx_themata_source_guid ON themata(source_guid)"))
-  (gnosis--db-set-version 8))
+(defconst gnosis-db--study-guards
+  (cl-loop
+   for (table parent parent-key key conflict)
+   in '(("practice_events" "themata" "id" "thema_id"
+         "event_id = NEW.event_id OR (session_id = NEW.session_id AND attempt = NEW.attempt)")
+        ("review_voids" "review_events" "event_id" "event_id"
+         "correction_id = NEW.correction_id OR event_id = NEW.event_id")
+        ("practice_voids" "practice_events" "event_id" "event_id"
+         "correction_id = NEW.correction_id OR event_id = NEW.event_id"))
+   append
+   (list
+    (format "CREATE TRIGGER %s_no_update BEFORE UPDATE ON %s
+               BEGIN SELECT RAISE(ABORT, 'immutable study evidence'); END" table table)
+    ;; REPLACE can delete conflicts without firing DELETE triggers.
+    (format "CREATE TRIGGER %s_no_replace BEFORE INSERT ON %s
+               WHEN EXISTS (SELECT 1 FROM %s WHERE %s)
+               BEGIN SELECT RAISE(ABORT, 'study identity exists'); END"
+            table table table conflict)
+    (format "CREATE TRIGGER %s_no_direct_delete BEFORE DELETE ON %s
+               WHEN EXISTS (SELECT 1 FROM %s WHERE %s = OLD.%s)
+               BEGIN SELECT RAISE(ABORT, 'hard deletion required'); END"
+            table table parent parent-key key)))
+  "Supported study evidence guards, shared by creation and validation.")
 
-(defconst gnosis-db--migrations
-  `((1 . gnosis-db--migrate-v1)
-    (2 . gnosis-db--migrate-v2)
-    (3 . gnosis-db--migrate-v3)
-    (4 . gnosis-db--migrate-v4)
-    (5 . gnosis-db--migrate-v5)
-    (6 . gnosis-db--migrate-v6)
-    (7 . gnosis-db--migrate-v7)
-    (8 . gnosis-db--migrate-v8))
-  "Alist of (VERSION . FUNCTION).
-Each migration brings the DB from VERSION-1 to VERSION.")
+(defun gnosis-db--create-study-guards (db)
+  "Protect immutable practice and correction evidence in DB."
+  (dolist (sql gnosis-db--study-guards)
+    (gnosis-sqlite-execute db sql)))
 
-(defun gnosis--db-run-migrations (current-version)
-  "Run all pending migrations from CURRENT-VERSION to `gnosis-db-version'.
-Commits the database after all migrations complete."
-  (let ((migrated nil))
-    (cl-loop for (version . func) in gnosis-db--migrations
-	     when (> version current-version)
-	     do (progn
-		  (message "Gnosis: running migration to v%d..." version)
-		  (funcall func)
-		  (message "Gnosis: migration to v%d complete" version)
-		  (setq migrated version)))
-    (when migrated
-      (gnosis--commit-migration current-version migrated))))
+(defun gnosis--db-run-migrations (current-version &optional no-commit)
+  "Upgrade released CURRENT-VERSION to `gnosis-db-version'.
+Commit afterwards unless NO-COMMIT defers that until outer validation."
+  (pcase current-version
+    (8 (gnosis-db--migrate-v9)
+       (unless no-commit (gnosis--commit-migration 8 9)))
+    (9 nil)
+    (_ (error "Unsupported Gnosis migration source %s" current-version))))
 
 (defun gnosis--commit-migration (from to)
   "Commit database after migrating from version FROM to TO.
@@ -687,14 +675,162 @@ before database initialization continues."
                       "commit" "-m"
                       (format "Migrate database v%d -> v%d" from to))))))
 
+(defconst gnosis-db-min-version 8
+  "Oldest supported schema: released Gnosis 0.10.6.
+Until 0.11.0 is published, schema 8 to 9 is the sole migration boundary.
+Private development schemas require a separate, verified conversion.")
+
+(defconst gnosis-db--legacy-schemata
+  '((review
+     ([(id integer :primary-key :not-null) ;; thema-id
+       (gnosis integer :not-null)
+       (amnesia integer :not-null)]
+      (:foreign-key [id] :references themata [id]
+		    :on-delete :cascade)))
+    (review-log
+     ([(id integer :primary-key :not-null) ;; thema-id
+       (last-rev integer :not-null)  ;; Last review date
+       (next-rev integer :not-null)  ;; Next review date
+       (c-success integer :not-null) ;; Consecutive successful reviews
+       (t-success integer :not-null) ;; Total successful reviews
+       (c-fails integer :not-null)   ;; Consecutive failed reviews
+       (t-fails integer :not-null)   ;; Total failed reviews
+       (suspend integer :not-null)   ;; Binary value, 1=suspended
+       (n integer :not-null)]        ;; Number of reviews
+      (:foreign-key [id] :references themata [id]
+		    :on-delete :cascade)))
+    (activity-log
+     ([(date integer :not-null)
+       (reviewed-total integer :not-null)
+       (reviewed-new integer :not-null)])))
+  "Legacy scheduler tables declared by released Gnosis 0.10.6.")
+
+(defun gnosis-db--schemata-for-version (version)
+  "Return required table declarations for supported VERSION."
+  (pcase version
+    (8 (append gnosis-db--legacy-schemata
+               (seq-filter
+                (lambda (entry)
+                  (memq (car entry) '(themata extras thema-tag thema-links nodes
+                                     journal node-tag node-links)))
+                gnosis-db--schemata)))
+    (9 gnosis-db--schemata)
+    (_ (error "Unsupported Gnosis schema %s" version))))
+
+(defun gnosis-db--compatible-columns-p (table schema actual &optional version)
+  "Check ACTUAL column metadata against TABLE's SCHEMA and retained layouts.
+Keep column order: positional readers and writers rely on it.  Only themata's
+observed nullable archive field, the equivalent composite tag key, and the
+historical text-affinity link source may differ from fresh storage.
+VERSION defaults to the current schema; older schemas do not yet have aliases."
+  (let* ((version (or version gnosis-db-version))
+         (columns (append (car schema) nil))
+         (columns (if (and (eq table 'themata) (< version 9))
+                      (seq-remove (lambda (column) (eq (car column) 'accepted-aliases)) columns)
+                    columns))
+         (expected
+         (mapcar (lambda (column)
+                   (list (gnosis-sqlite--ident (car column))
+                         (upcase (symbol-name (cadr column)))
+                         (if (memq :not-null column) 1 0)
+                         nil (if (memq :primary-key column) 1 0)))
+                 columns)))
+    (or (equal actual expected)
+        (pcase table
+          ('themata
+           (or (equal actual (append expected '(("archived_at_us" "INTEGER" 0 nil 0))))
+               (and (>= version 9)
+                    (equal actual (append (butlast expected)
+                                          '(("archived_at_us" "INTEGER" 0 nil 0))
+                                          (last expected))))))
+          ('thema-tag
+           (equal actual '(("thema_id" "INTEGER" 1 nil 1)
+                           ("tag" "TEXT" 1 nil 2))))
+          ;; a63dbe8 changed the fresh declaration, not existing link tables.
+          ('thema-links
+           (equal actual '(("source" "TEXT" 0 nil 0)
+                           ("dest" "TEXT" 0 nil 0))))))))
+
+(defun gnosis-db--guard-tokens (sql)
+  "Return comparable tokens for a supported evidence guard SQL declaration.
+Ignore whitespace and unquoted case; preserve string literals.  Accept the
+quoted identifiers SQLite emits when renaming tables.  This is deliberately
+not a general SQL equivalence test: unknown guard definitions are refused."
+  (with-temp-buffer
+    (insert sql)
+    (goto-char (point-min))
+    (cl-loop
+     while (re-search-forward
+            (rx (or (seq "'" (* (or "''" (not (any "'")))) "'")
+                    (seq "\"" (* (or "\"\"" (not (any "\"")))) "\"")
+                    (+ (any alnum "_"))
+                    (not (any " \t\r\n"))))
+            nil t)
+     for token = (match-string-no-properties 0)
+     collect (pcase (aref token 0)
+               (?' token)
+               (?\" (downcase (string-replace "\"\"" "\"" (substring token 1 -1))))
+               (_ (downcase token))))))
+
+(defun gnosis-db--check-schema (db version)
+  "Check required tables, columns and evidence guards of DB at VERSION.
+This is a compatibility check, not an exact DDL fingerprint or a check of
+all application values.  Reject damaged required objects before any writes."
+  (let ((tables (mapcar #'car (sqlite-select db
+                  "SELECT name FROM sqlite_master WHERE type = 'table'")))
+        (triggers (sqlite-select db
+                   "SELECT name, sql FROM sqlite_master WHERE type = 'trigger'")))
+    (when (= version 8)
+      (dolist (entry gnosis-db--schemata)
+        (unless (assq (car entry) (gnosis-db--schemata-for-version 8))
+          (when (member (gnosis-sqlite--ident (car entry)) tables)
+            (error "Unexpected current table in released schema 8: %s" (car entry))))))
+    (pcase-dolist (`(,table ,schema) (gnosis-db--schemata-for-version version))
+        (let ((name (gnosis-sqlite--ident table)))
+          (unless (and (member name tables)
+                       (gnosis-db--compatible-columns-p
+                        table schema
+                        (mapcar (lambda (row)
+                                  (list (nth 1 row) (upcase (nth 2 row))
+                                        (nth 3 row) (nth 4 row) (nth 5 row)))
+                                (sqlite-select db (format "PRAGMA table_info(%s)" name)))
+                        version))
+            (error "Invalid Gnosis schema %d: required table/columns %s" version name))))
+    (when (>= version 9)
+      (dolist (sql (append gnosis-db--scheduler-guards gnosis-db--study-guards))
+        (let* ((expected (gnosis-db--guard-tokens sql))
+               (name (nth 2 expected))
+               (actual (cadr (assoc-string name triggers t))))
+          (unless (and actual (equal expected (gnosis-db--guard-tokens actual)))
+            (error "Invalid Gnosis schema %d: missing or changed guard %s"
+                   version name))))))
+  (when (and (>= version 9)
+             (not (equal '((1)) (sqlite-select db "SELECT id FROM scheduler_config WHERE id = 1"))))
+    (error "Gnosis database is missing its baseline scheduler configuration"))
+  (when (and (>= version 9)
+             (not (equal '((1)) (sqlite-select db "SELECT id FROM scheduler_active"))))
+    (error "Gnosis database must have one active scheduler configuration"))
+  (unless (equal '(("ok")) (sqlite-select db "PRAGMA quick_check"))
+    (error "Gnosis database integrity check failed"))
+  (when (sqlite-select db "PRAGMA foreign_key_check")
+    (error "Gnosis database has foreign-key violations")))
+
 (defun gnosis-db-init ()
-  "Initialize database: create tables if fresh, run pending migrations."
-  (let ((version (gnosis--db-version)))
+  "Initialize a fresh database or validate and upgrade a supported schema.
+Reject unknown versions and incomplete required schemas without migrating."
+  (let ((version (gnosis--db-version))
+        (db (gnosis--ensure-db)))
     (if (and (zerop version) (not (gnosis--db-has-tables-p)))
-	;; Fresh database: create all tables at current version
-	(gnosis--db-create-tables)
-      ;; Existing database: run any pending migrations
-      (gnosis--db-run-migrations version))))
+        (gnosis--db-create-tables)
+      (unless (<= gnosis-db-min-version version gnosis-db-version)
+        (user-error "Unsupported Gnosis schema %d (supported %d–%d); preserve a backup and use matching source"
+                    version gnosis-db-min-version gnosis-db-version))
+      (gnosis-db--check-schema db version)
+      (gnosis-sqlite-with-transaction db
+        (gnosis--db-run-migrations version t)
+        (gnosis-db--check-schema db gnosis-db-version))
+      (when (< version gnosis-db-version)
+        (gnosis--commit-migration version gnosis-db-version)))))
 
 (provide 'gnosis-db)
 ;;; gnosis-db.el ends here

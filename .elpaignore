@@ -1,9 +1,11 @@
 CONTRIBUTING.org
 LICENSE
 Makefile
-flake.nix
-flake.lock
 
 tests
 
 decks
+optional
+AGENTS.md
+flake.nix
+flake.lock

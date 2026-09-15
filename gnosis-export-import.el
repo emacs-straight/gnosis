@@ -33,10 +33,12 @@
 
 (require 'gnosis)
 (require 'gnosis-db)
+(require 'gnosis-answer)
+(require 'gnosis-scheduler)
 (require 'gnosis-tags)
 (require 'gnosis-vc)
 (require 'gnosis-links)
-(require 'gnosis-algorithm)
+(require 'gnosis-logical-day)
 (require 'gnosis-sqlite)
 (require 'keymap-popup)
 (require 'org)
@@ -58,7 +60,7 @@
 					  &optional keimenon
 					  hypothesis answer
 					  parathema tags
-					  example)
+					  example accepted-aliases)
   "Insert thema for thema ID.
 
 TYPE: Thema type, refer to `gnosis-thema-types'
@@ -67,11 +69,23 @@ HYPOTHESIS: Hypothesis for what the ANSWER is
 ANSWER: The revelation after KEIMENON
 PARATHEMA: The text where THEMA is derived from.
 TAGS: List of THEMA tags
-EXAMPLE: Boolean value, if non-nil do not add properties for thema."
+EXAMPLE: Boolean value, if non-nil do not add properties for thema.
+ACCEPTED-ALIASES: Independent list of authored accepted spellings."
+  (when (and (equal (downcase type) "image-occlusion")
+             hypothesis answer (not (string-match-p "\n- " hypothesis)))
+    (pcase-let ((`(,fields ,text)
+                 (gnosis-image-occlusion-fields (list hypothesis) (list answer))))
+      (setq hypothesis (mapconcat #'identity fields "\n- ") answer (car text))))
   (let ((components `(("** Keimenon" . ,keimenon)
-                      ("** Hypothesis" . ,hypothesis)
+                      (,(cond ((member (downcase type) '("model" "model-name")) "** Resource and starting view")
+                              ((member (downcase type) '("image-region" "image-occlusion"))
+                               "** Image resource")
+                              (t "** Hypothesis")) . ,hypothesis)
                       ("** Answer" . ,answer)
-                      ("** Parathema" . ,parathema))))
+                      ("** Parathema" . ,parathema)
+                      ,@(when accepted-aliases
+                          (list (cons "** Accepted aliases"
+                                      (gnosis-answer-aliases-to-section accepted-aliases)))))))
     (goto-char (point-max))
     (insert "\n* Thema")
     (when tags
@@ -94,55 +108,61 @@ EXAMPLE: Boolean value, if non-nil do not add properties for thema."
       (gnosis-export--insert-read-only (car comp))
       (insert "\n" (or (cdr comp) "") "\n\n"))))
 
-(defun gnosis-export-parse-themata (&optional separator)
-  "Extract content for each level-2 heading for thema
-headings with a GNOSIS_ID.
+(defun gnosis-export--parse-field (title text separator)
+  "Parse field TITLE from TEXT using list SEPARATOR."
+  (cond
+   ((equal title "Accepted aliases")
+    (gnosis-answer-aliases-from-section text))
+   ((string-empty-p text) nil)
+   ((member title '("Hypothesis" "Resource and starting view" "Image resource" "Answer"))
+    (if (equal text "-") '("")
+      (mapcar #'string-trim
+              (split-string (string-remove-prefix "- " text)
+                            separator t "[ \t\n]+"))))
+   (t text)))
 
-Split content of Hypothesis and Answer headings using
-SEPARATOR."
-  (let ((sep (or separator gnosis-export-separator))
-        results)
+(defun gnosis-export-parse-themata (&optional separator)
+  "Extract level-1 themata by field heading, using list SEPARATOR.
+Return (ID TYPE KEIMENON HYPOTHESIS ANSWER PARATHEMA TAGS LINE ALIASES).
+Missing aliases mean nil.  Reject duplicate and unknown field headings."
+  (let ((sep (or separator gnosis-export-separator)) results)
     (org-element-map (org-element-parse-buffer) 'headline
       (lambda (headline)
-        (let* ((level (org-element-property :level headline))
-               (gnosis-id (org-element-property :GNOSIS_ID headline))
-               (gnosis-type (org-element-property :GNOSIS_TYPE headline))
-               (tags (org-element-property :tags headline)))
-          (when (and (= level 1) gnosis-id gnosis-type)
-            (let ((line (line-number-at-pos
-                         (org-element-property :begin headline)))
-                  entry)
-              (push gnosis-id entry)
-              (push gnosis-type entry)
+        (let ((id (org-element-property :GNOSIS_ID headline))
+              (type (org-element-property :GNOSIS_TYPE headline)))
+          (when (and (= 1 (org-element-property :level headline)) id type)
+            (let (fields)
               (dolist (child (org-element-contents headline))
                 (when (eq 'headline (org-element-type child))
-                  (let* ((child-title
-                          (org-element-property
-                           :raw-value child))
-                         (child-text
-                          (substring-no-properties
-                           (string-trim
-                            (org-element-interpret-data
-                             (org-element-contents child)))))
-                         (processed-text
-                          (cond
-                           ((and (member child-title
-                                         '("Hypothesis" "Answer"))
-                                 (not (string-empty-p child-text)))
-                            (mapcar
-                             (lambda (s)
-                               (string-trim
-                                (string-remove-prefix
-                                 "-"
-                                 (string-remove-prefix sep s))))
-                             (split-string
-                              child-text sep t "[ \t\n]+")))
-                           ((string-empty-p child-text) nil)
-                           (t child-text))))
-                    (push processed-text entry))))
-              (push tags entry)
-              (push line entry)
-              (push (nreverse entry) results)))))
+                  (let* ((title (org-element-property :raw-value child))
+                         (slot (cdr (assoc title
+                                           '(("Keimenon" . 2) ("Hypothesis" . 3)
+                                             ("Resource and starting view" . 3)
+                                             ("Image resource" . 3) ("Answer" . 4)
+                                             ("Parathema" . 5) ("Accepted aliases" . 8)))))
+                         (raw (if (equal title "Accepted aliases")
+                                  ;; Org interpretation rewrites checkboxes and
+                                  ;; spacing; aliases are literal authored text.
+                                  (save-excursion
+                                    (goto-char (org-element-property :begin child))
+                                    (forward-line 1)
+                                    (buffer-substring-no-properties
+                                     (point) (org-element-property :end child)))
+                                (substring-no-properties
+                                 (org-element-interpret-data (org-element-contents child)))))
+                         (text (if (equal title "Accepted aliases")
+                                   (string-trim raw "[\n\r]+" "[\n\r]+")
+                                 (string-trim raw))))
+                    (unless slot (user-error "Unknown thema field: %s" title))
+                    (when (assq slot fields) (user-error "Duplicate thema field: %s" title))
+                    (push (cons slot (gnosis-export--parse-field title text sep)) fields))))
+              (push (append
+                     (list id type (alist-get 2 fields) (alist-get 3 fields)
+                           (alist-get 4 fields) (alist-get 5 fields)
+                           (org-element-property :tags headline)
+                           (line-number-at-pos (org-element-property :begin headline)))
+                     (when (assq 8 fields) (list (alist-get 8 fields))))
+                    results)))))
       nil nil)
     results))
 
@@ -156,14 +176,18 @@ generate new thema id."
                              (if (listp id) (car id) id))
                            ids)))
     (dolist (id id-values)
-      (let ((thema-data
-             (append (gnosis-select
+      (let* ((thema-data
+              (append (gnosis-select
                       '[type keimenon hypothesis answer]
                       'themata `(= id ,id) t)
                      (gnosis-select 'parathema 'extras
                                     `(= id ,id) t)))
-            (tags (gnosis-select 'tag 'thema-tag
-                                 `(= thema-id ,id) t)))
+             ;; Resolve legacy fields before native list markers are added.
+             (fields (if (equal (downcase (car thema-data)) "image-occlusion")
+                         (gnosis-image-occlusion-fields (nth 2 thema-data) (nth 3 thema-data))
+                       (list (nth 2 thema-data) (nth 3 thema-data))))
+             (tags (gnosis-select 'tag 'thema-tag
+                                  `(= thema-id ,id) t)))
         (gnosis-export--insert-thema
          (if new-p "NEW" (number-to-string id))
          (nth 0 thema-data)
@@ -171,15 +195,15 @@ generate new thema id."
          (concat (string-remove-prefix
                   "\n" gnosis-export-separator)
                  (mapconcat #'identity
-                            (nth 2 thema-data)
+                            (car fields)
                             gnosis-export-separator))
          (concat (string-remove-prefix
                   "\n" gnosis-export-separator)
                  (mapconcat #'identity
-                            (nth 3 thema-data)
+                            (cadr fields)
                             gnosis-export-separator))
          (nth 4 thema-data)
-         tags)))))
+         tags nil (gnosis-get 'accepted-aliases 'themata `(= id ,id)))))))
 
 (defun gnosis-save-thema (thema)
   "Save THEMA.
@@ -208,18 +232,28 @@ Returns nil on success, or an error message string on failure."
                type)
     (condition-case err
         (progn
-          (funcall thema-func id type keimenon
-                   hypothesis answer parathema
-                   tags 0 links)
+          (let* ((aliases (nth 8 thema))
+                 (arguments (list id type keimenon hypothesis answer parathema
+                                  tags 0 links))
+                 (maximum (cdr (func-arity thema-func))))
+            ;; Old third-party handlers can still save alias-free drafts.
+            ;; Never discard authored aliases for a handler that cannot save them.
+            (apply thema-func
+                   (if (and (null aliases) (eql maximum 9)) arguments
+                     (append arguments (list aliases)))))
           nil)
       (error
        (format "Line %s (id:%s): %s"
                (or line "?") id
                (error-message-string err))))))
 
+;;;###autoload
 (defun gnosis-save ()
-  "Save themata in current buffer."
+  "Save themata in the current native draft.
+Refuse changed database ownership or original content without discarding
+the draft.  Copy its text before cancelling and reopening to reconcile."
   (interactive nil gnosis-edit-mode)
+  (gnosis--draft-check-owner)
   (let* ((gc-cons-threshold most-positive-fixnum)
          (themata (gnosis-export-parse-themata))
          (gnosis--id-cache
@@ -227,24 +261,32 @@ Returns nil on success, or an error message string on failure."
             (dolist (id (gnosis-select 'id 'themata nil t) ht)
               (puthash id t ht))))
          (errors nil)
+         (receipt gnosis--draft-save-receipt)
+         (saved-content nil)
          (edited-id (string-to-number (caar themata))))
-    (gnosis-sqlite-with-transaction (gnosis--ensure-db)
-      (cl-loop for thema in themata
-               for err = (gnosis-save-thema thema)
-               when err do (push err errors)))
+    (catch 'gnosis-save-failed
+      (gnosis-sqlite-with-transaction gnosis--draft-db
+        (gnosis--draft-validate themata)
+        (cl-loop for thema in themata
+                 for err = (gnosis-save-thema thema)
+                 when err do (push err errors))
+        (when errors
+          (throw 'gnosis-save-failed nil))
+        (when (and receipt gnosis--draft-original)
+          (setq saved-content
+                (list gnosis--draft-db (car gnosis--draft-original)
+                      (seq-take (gnosis--draft-content
+                                 gnosis--draft-db (car gnosis--draft-original)) 2))))))
     (if errors
         (user-error
          "Failed to import %d thema(ta):\n%s"
          (length errors)
          (mapconcat #'identity (nreverse errors) "\n"))
+      (when receipt (setcar receipt saved-content))
       (gnosis-edit-quit)
       (run-hook-with-args 'gnosis-save-hook edited-id))))
 
 ;;; SQLite export
-
-(defun gnosis-import--sanitize-path (path)
-  "Escape single quotes in PATH for use in SQL ATTACH statement."
-  (replace-regexp-in-string "'" "''" (expand-file-name path)))
 
 (defconst gnosis-export--themata-schema
   "CREATE TABLE export_db.themata (
@@ -252,7 +294,8 @@ Returns nil on success, or an error message string on failure."
   type TEXT NOT NULL,
   keimenon TEXT NOT NULL,
   hypothesis TEXT NOT NULL,
-  answer TEXT NOT NULL)"
+  answer TEXT NOT NULL,
+  accepted_aliases TEXT)"
   "SQL schema for the themata table in export databases.")
 
 (defconst gnosis-export--thema-tag-schema
@@ -277,14 +320,197 @@ Returns nil on success, or an error message string on failure."
   value TEXT)"
   "SQL schema for the gnosis_meta table in export databases.")
 
+(defconst gnosis-export-format-version 3
+  "Current SQLite content export format version.")
+
+(defun gnosis-export--image-ids (db schema)
+  "Return IDs with managed images in content DB SCHEMA, including malformed refs."
+  (unless (member schema '("main" "import_db")) (error "Invalid content schema"))
+  (cl-loop for row in (gnosis-sqlite-select
+                      db (format "SELECT t.id, t.type, t.keimenon, t.hypothesis,
+                                         t.answer, e.parathema, e.review_image, %s
+                                  FROM %s.themata t LEFT JOIN %s.extras e ON t.id = e.id"
+                                 (if (seq-some
+                                      (lambda (column) (equal (nth 1 column) "accepted_aliases"))
+                                      (sqlite-select db (format "PRAGMA %s.table_info(themata)" schema)))
+                                     "t.accepted_aliases" "NULL")
+                                 schema schema))
+           when (or (member (downcase (nth 1 row)) '("image-region" "image-occlusion"))
+                    (gnosis-image-content-p (cddr row)))
+           collect (car row)))
+
+(defun gnosis-import--format-version-in-db (db schema)
+  "Return supported content format version from DB SCHEMA."
+  (unless (member schema '("main" "import_db"))
+    (error "Invalid Gnosis content schema"))
+  (when (gnosis-sqlite-select
+         db (format "SELECT id FROM %s.themata WHERE lower(type) IN (?, ?)" schema)
+         '("model" "model-name"))
+    (user-error "Model resource content import is unsupported; assets are not bundled"))
+  (when (gnosis-export--image-ids db schema)
+    (user-error "Managed image content import is unsupported; assets are not bundled"))
+  (let ((objects
+         (sqlite-select
+          db (format "SELECT type, name FROM %s.sqlite_master
+                       WHERE lower(name) = 'gnosis_meta'" schema))))
+    (if (null objects) 1
+      (unless (and (= (length objects) 1)
+                   (equal "table" (caar objects)))
+        (error "Invalid Gnosis metadata object"))
+      (let ((columns
+             (mapcar
+              (lambda (row) (list (nth 1 row) (upcase (nth 2 row)) (nth 5 row)))
+              (sqlite-select db (format "PRAGMA %s.table_info(gnosis_meta)"
+                                        schema))))
+            (versions
+             (sqlite-select
+              db (format "SELECT key, value FROM %s.gnosis_meta
+                           WHERE lower(key) = 'format_version'" schema))))
+        (unless (equal columns '(("key" "TEXT" 1) ("value" "TEXT" 0)))
+          (error "Invalid Gnosis metadata schema"))
+        (cond
+         ((null versions) 1)
+         ((and (= (length versions) 1)
+               (equal "format_version" (caar versions)))
+          (let ((raw (cadar versions)))
+            (unless (and (stringp raw)
+                         (string-match-p "\\`[0-9]+\\'" raw))
+              (error "Invalid Gnosis content format version"))
+            (let ((version (string-to-number raw)))
+              (unless (memq version (list 1 2 gnosis-export-format-version))
+                (error "Unsupported Gnosis content format version: %s"
+                       version))
+              version)))
+         (t (error "Invalid Gnosis format-version metadata")))))))
+
+(defun gnosis-import--format-version (file)
+  "Return supported content format version of SQLite FILE."
+  (let ((db (sqlite-open file)))
+    (unwind-protect
+        (gnosis-import--format-version-in-db db "main")
+      (sqlite-close db))))
+
+(defun gnosis-import--file-sha256 (file)
+  "Return SHA-256 identity of FILE bytes."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file)
+    (secure-hash 'sha256 (current-buffer))))
+
+(defconst gnosis-export--sqlite-companions '("-wal" "-shm" "-journal")
+  "Companion suffixes which must not be replaced independently of SQLite.")
+
+(defun gnosis-export--check-destination (db file)
+  "Reject FILE if it overlaps DB files or has SQLite companions.
+Protect active database and companion aliases, even before creation.
+Never remove, recover or checkpoint another owner's companion files."
+  (when (file-remote-p file)
+    (user-error "Export requires a local destination"))
+  (let ((target (file-truename file)))
+    (dolist (row (sqlite-select db "PRAGMA database_list"))
+      (let ((active (nth 2 row)))
+        (when (and active (not (string-empty-p active)))
+          (dolist (base (list active (file-truename active)))
+            (dolist (suffix (cons "" gnosis-export--sqlite-companions))
+              (let ((protected (concat base suffix)))
+                (when (or (equal target (file-truename protected))
+                          (and (file-exists-p file) (file-exists-p protected)
+                               (file-equal-p file protected)))
+                  (user-error "Cannot export over an active Gnosis database or companion"))))))))
+    (dolist (base (list file target))
+      (dolist (suffix gnosis-export--sqlite-companions)
+        (let ((companion (concat base suffix)))
+          (when (or (file-exists-p companion) (file-symlink-p companion))
+            (user-error "Cannot replace an export with SQLite companions: %s"
+                        companion)))))))
+
+(defun gnosis-export--validate (file count)
+  "Validate completed export FILE containing COUNT themata."
+  (let ((db (gnosis-sqlite-open file)))
+    (unwind-protect
+        (unless (and (= (gnosis-import--format-version-in-db db "main")
+                        gnosis-export-format-version)
+                     (equal '(("ok")) (sqlite-select db "PRAGMA integrity_check"))
+                     (null (sqlite-select db "PRAGMA foreign_key_check"))
+                     (= count (caar (sqlite-select db "SELECT COUNT(*) FROM themata")))
+                     (equal (number-to-string count)
+                            (caar (sqlite-select db "SELECT value FROM gnosis_meta
+                                                    WHERE key = 'thema_count'")))
+                     (equal '(("extras") ("gnosis_meta") ("thema_tag") ("themata"))
+                            (sqlite-select db "SELECT name FROM sqlite_master
+                                               WHERE type = 'table' ORDER BY name")))
+          (error "Invalid completed Gnosis export"))
+      (sqlite-close db))))
+
+(defun gnosis-export--write-content (db ids selection-p count)
+  "Write content for IDS to the attached export database on DB.
+SELECTION-P distinguishes an empty selection from all themata.
+Record COUNT as the expected number of exported themata."
+  (gnosis-sqlite-with-transaction db
+    (gnosis-import--content-rows
+     db "main" (if selection-p ids
+                 (mapcar #'car (sqlite-select db "SELECT id FROM themata"))))
+    (dolist (schema (list gnosis-export--themata-schema
+                         gnosis-export--thema-tag-schema
+                         gnosis-export--extras-schema
+                         gnosis-export--meta-schema))
+      (gnosis-sqlite-execute db schema))
+    (unless (and selection-p (null ids))
+      (pcase-dolist (`(,table ,columns ,key)
+                    '(("themata" "id, type, keimenon, hypothesis, answer, accepted_aliases" "id")
+                      ("extras" "id, parathema, review_image" "id")
+                      ("thema_tag" "thema_id, tag" "thema_id")))
+        (let ((sql (format "INSERT INTO export_db.%s SELECT %s FROM main.%s"
+                           table columns table)))
+          (if selection-p
+              (gnosis-sqlite-execute-batch
+               db (concat sql " WHERE " key " IN (%s)") ids)
+            (gnosis-sqlite-execute db sql)))))
+    ;; Metadata is plain text, not EmacSQL-encoded content.
+    (dolist (row `(("format_version" ,(number-to-string gnosis-export-format-version))
+                   ("exported_at" ,(format-time-string "%Y-%m-%dT%H:%M:%S"))
+                   ("thema_count" ,(number-to-string count))))
+      (sqlite-execute db "INSERT INTO export_db.gnosis_meta (key, value)
+                          VALUES (?, ?)" row))))
+
+(defun gnosis-export--replace-file (db file ids selection-p count)
+  "Atomically replace FILE with exported content from DB.
+IDS, SELECTION-P and COUNT describe the reviewed selection.  Build and
+validate a private sibling first; preserve FILE on error or quit."
+  (gnosis-export--check-destination db file)
+  (let ((scratch (make-temp-file
+                  (expand-file-name ".gnosis-export-" (file-name-directory file))
+                  nil ".db"))
+        attached)
+    (unwind-protect
+        (progn
+          (unwind-protect
+              (progn
+                (let ((inhibit-quit t))
+                  (sqlite-execute db "ATTACH DATABASE ? AS export_db" (list scratch))
+                  (setq attached t))
+                (gnosis-export--write-content db ids selection-p count))
+            (when attached
+              (let ((inhibit-quit t))
+                (sqlite-execute db "DETACH DATABASE export_db"))))
+          (gnosis-export--validate scratch count)
+          (let ((inhibit-quit t))
+            (gnosis-export--check-destination db file)
+            (rename-file scratch file t)))
+      (when (file-exists-p scratch)
+        (delete-file scratch)))))
+
 ;;;###autoload
 (defun gnosis-export-db (file &optional include-tags
                               exclude-tags include-suspended)
   "Export filtered themata to FILE as a SQLite database.
 
-When called interactively, prompts for tag filters.
+When called interactively, prompt for tag filters.
 INCLUDE-TAGS and EXCLUDE-TAGS filter themata.
-When INCLUDE-SUSPENDED, also export suspended themata."
+When INCLUDE-SUSPENDED, also export suspended themata.
+Reject active database and companion aliases, and destinations with SQLite
+companions.  Replace an existing FILE only after completing and validating
+the export; errors preserve the previous file."
   (interactive
    (let ((filter (gnosis-tags-filter-prompt)))
      (list (read-file-name "Export database: "
@@ -293,103 +519,41 @@ When INCLUDE-SUSPENDED, also export suspended themata."
            (y-or-n-p "Include suspended themata? "))))
   (let* ((db (gnosis--ensure-db))
          (file (expand-file-name file))
-         (sanitized (gnosis-import--sanitize-path file))
          (suspended-ids
           (unless include-suspended
             (mapcar #'car
                     (gnosis-sqlite-select
-                     db
-                     "SELECT id FROM review_log WHERE suspend = 1"))))
-         (excluded-ht
-          (when suspended-ids
-            (let ((ht (make-hash-table
-                       :test 'equal
-                       :size (length suspended-ids))))
-              (dolist (id suspended-ids ht)
-                (puthash id t ht)))))
-         (ids
-          (cond
-           ((and (or include-tags exclude-tags)
-                 excluded-ht)
-            (cl-remove-if
-             (lambda (id) (gethash id excluded-ht))
-             (gnosis-filter-by-tags
-              include-tags exclude-tags)))
-           ((or include-tags exclude-tags)
-            (gnosis-filter-by-tags
-             include-tags exclude-tags))
-           (excluded-ht
-            (cl-remove-if
-             (lambda (id) (gethash id excluded-ht))
-             (mapcar #'car
-                     (gnosis-sqlite-select
-                      db "SELECT id FROM themata"))))
-           (t nil)))
-         (count
-          (if ids (length ids)
-            (caar (gnosis-sqlite-select
-                   db "SELECT COUNT(*) FROM themata")))))
+                     db "SELECT thema_id FROM scheduler_state WHERE suspended = 1"))))
+         (selection-p (or include-tags exclude-tags suspended-ids))
+         (ids (when selection-p
+                (seq-difference (gnosis-filter-by-tags include-tags exclude-tags)
+                                suspended-ids)))
+         (count (if selection-p (length ids)
+                  (caar (sqlite-select db "SELECT COUNT(*) FROM themata")))))
+    (when (seq-some (lambda (row)
+                      (or (not selection-p) (member (car row) ids)))
+                    (gnosis-sqlite-select db "SELECT id FROM themata WHERE lower(type) IN (?, ?)"
+                                          '("model" "model-name")))
+      (user-error "Model resource content export is unsupported; back up DB and assets together"))
+    (when (seq-some (lambda (id) (or (not selection-p) (member id ids)))
+                    (gnosis-export--image-ids db "main"))
+      (user-error "Managed image content export is unsupported; back up DB and assets together"))
+    (gnosis-export--check-destination db file)
     (when (called-interactively-p 'any)
-      (unless (y-or-n-p
-               (format "Export %d themata to %s? "
-                       count file))
+      (unless (y-or-n-p (format "Export %d themata to %s? " count file))
         (user-error "Export cancelled")))
-    (when (file-exists-p file)
-      (delete-file file))
-    (gnosis-sqlite-execute
-     db (format "ATTACH DATABASE '%s' AS export_db"
-                sanitized))
-    (unwind-protect
-        (progn
-          (gnosis-sqlite-execute db gnosis-export--themata-schema)
-          (gnosis-sqlite-execute db gnosis-export--thema-tag-schema)
-          (gnosis-sqlite-execute db gnosis-export--extras-schema)
-          (gnosis-sqlite-execute db gnosis-export--meta-schema)
-          (if ids
-              (progn
-                (gnosis-sqlite-execute-batch db
-                                             "INSERT INTO export_db.themata SELECT id, type, keimenon, hypothesis, answer FROM themata WHERE id IN (%s)"
-                                             ids)
-                (gnosis-sqlite-execute-batch db
-                                             "INSERT INTO export_db.extras SELECT id, parathema, review_image FROM extras WHERE id IN (%s)"
-                                             ids)
-                (gnosis-sqlite-execute-batch db
-                                             "INSERT INTO export_db.thema_tag SELECT thema_id, tag FROM thema_tag WHERE thema_id IN (%s)"
-                                             ids))
-            (gnosis-sqlite-execute db
-                                   "INSERT INTO export_db.themata SELECT id, type, keimenon, hypothesis, answer FROM themata")
-            (gnosis-sqlite-execute db
-                                   "INSERT INTO export_db.extras SELECT id, parathema, review_image FROM extras")
-            (gnosis-sqlite-execute db
-                                   "INSERT INTO export_db.thema_tag SELECT thema_id, tag FROM thema_tag"))
-          ;; Metadata uses raw sqlite-execute to store plain text
-          ;; (gnosis-sqlite-execute would emacsql-encode the values)
-          (let ((now (format-time-string "%Y-%m-%dT%H:%M:%S")))
-            (sqlite-execute db
-                            "INSERT INTO export_db.gnosis_meta (key, value) VALUES (?, ?)"
-                            (list "exported_at" now))
-            (sqlite-execute db
-                            "INSERT INTO export_db.gnosis_meta (key, value) VALUES (?, ?)"
-                            (list "thema_count"
-                                  (number-to-string count)))))
-      (gnosis-sqlite-execute db "DETACH DATABASE export_db"))
+    (gnosis-export--replace-file db file ids selection-p count)
     (message "Exported %d themata to %s" count file)))
 
 ;;; SQLite import
 
-(defun gnosis-import--commit (new-count changed-count
-					filename)
-  "Commit database after importing NEW-COUNT new and
-CHANGED-COUNT changed from FILENAME."
-  (unless gnosis-testing
-    (when (file-exists-p (expand-file-name ".git" gnosis-dir))
-      (gnosis--git-chain
-       `(("add" "gnosis.db")
-         ("commit" "-m"
-          ,(format "Import: %d new, %d updated from %s"
-                   new-count changed-count filename)))
-       (lambda ()
-         (when gnosis-vc-auto-push (gnosis-vc-push)))))))
+(defun gnosis-import--commit (new-count changed-count filename)
+  "Commit database after importing NEW-COUNT new entries.
+CHANGED-COUNT is the updated count from FILENAME."
+  (gnosis-vc--auto-commit
+   (format "Import: %d new, %d updated from %s"
+           new-count changed-count filename)
+   t))
 
 (defface gnosis-import-new-face
   '((t :inherit success))
@@ -404,90 +568,146 @@ CHANGED-COUNT changed from FILENAME."
 (defvar-local gnosis-import--file nil
   "Path to the import database file.")
 
+(defvar-local gnosis-import--source-id nil
+  "SHA-256 identity of the reviewed import database bytes.")
+
 (defvar-local gnosis-import--new-ids nil
   "List of new thema IDs from the import.")
 
 (defvar-local gnosis-import--changed-ids nil
   "List of changed thema IDs from the import.")
 
-(defun gnosis-import--changed-fields (row)
-  "Return comma-separated string of changed field names
-from ROW.  ROW has flags at positions 3-7: type, keimenon,
-hypothesis, answer, parathema."
-  (let ((names '((3 . "type") (4 . "keimenon")
-                 (5 . "hypothesis") (6 . "answer")
-                 (7 . "parathema") (8 . "tags"))))
-    (mapconcat
-     #'cdr
-     (cl-remove-if-not
-      (lambda (pair)
-        (= 1 (or (nth (car pair) row) 0)))
-      names)
-     ", ")))
+(defvar-local gnosis-import--destination nil
+  "Database handle and content rows shown in the reviewed import diff.")
+
+(defvar-local gnosis-import--details nil
+  "Reviewed (ID CURRENT INCOMING) entries for detail rendering.
+CURRENT and INCOMING are normalized content rows, never reread for display.")
+
+(defun gnosis-import--normalize-rows (rows tags)
+  "Return content ROWS with sorted TAGS inserted before their aliases.
+TAGS contains (THEMA-ID TAG) rows.  Preserve absent and empty values."
+  (let ((by-id (make-hash-table :test #'eql)))
+    (pcase-dolist (`(,id ,tag) tags)
+      (puthash id (cons tag (gethash id by-id)) by-id))
+    (mapcar (lambda (row)
+              (append (seq-take row 7)
+                      (list (sort (copy-sequence (gethash (car row) by-id)) #'string<)
+                            (nth 7 row))))
+            rows)))
+
+(defun gnosis-import--alias-column (db schema)
+  "Return alias SQL expression for content DB SCHEMA.
+Formats 1 and 2 have no aliases; format 3 must carry the column."
+  (unless (member schema '("main" "import_db"))
+    (error "Invalid Gnosis content schema"))
+  (if (or (equal schema "main")
+          (= 3 (gnosis-import--format-version-in-db db schema)))
+      "accepted_aliases"
+    "NULL"))
+
+(defun gnosis-import--validate-alias-row (row)
+  "Validate independent aliases in normalized content ROW and return ROW."
+  (let ((aliases (gnosis-answer-validate-aliases (nth 8 row))))
+    (when aliases
+      (unless (and (member (downcase (nth 1 row))
+                           '("basic" "image-occlusion" "model-name"))
+                   (proper-list-p (nth 4 row))
+                   (= 1 (length (nth 4 row)))
+                   (stringp (car (nth 4 row)))
+                   (not (string-empty-p (string-trim (car (nth 4 row))))))
+        (user-error "Aliases require one canonical typed answer"))))
+  row)
+
+(defun gnosis-import--content-rows (db schema ids)
+  "Read content rows for IDS in DB SCHEMA.
+Each row contains ID, TYPE, KEIMENON, HYPOTHESIS, ANSWER, PARATHEMA,
+REVIEW-IMAGE, TAGS, and ALIASES, in that order.
+TAGS is sorted; SQL NULL and empty strings remain distinct."
+  (unless (member schema '("main" "import_db"))
+    (error "Invalid Gnosis content schema"))
+  (mapcar #'gnosis-import--validate-alias-row
+   (gnosis-import--normalize-rows
+   (gnosis-sqlite-select-batch
+    db (format "SELECT t.id, t.type, t.keimenon, t.hypothesis, t.answer,
+                       e.parathema, e.review_image, %s
+                  FROM %s.themata t LEFT JOIN %s.extras e ON e.id = t.id
+                 WHERE t.id IN (%%s) ORDER BY t.id"
+               (gnosis-import--alias-column db schema) schema schema)
+    ids)
+   (gnosis-sqlite-select-batch
+    db (format "SELECT thema_id, tag FROM %s.thema_tag
+                 WHERE thema_id IN (%%s)" schema)
+    ids))))
+
+(defconst gnosis-import--content-fields
+  '("type" "keimenon" "hypothesis" "answer" "parathema" "review_image" "tags" "accepted_aliases")
+  "Field names in a normalized portable content row, after its ID.")
+
+(defun gnosis-import--change-plan (incoming current)
+  "Return new and changed preview rows from INCOMING and CURRENT content.
+Content rows follow `gnosis-import--content-rows'."
+  (let ((new (cl-remove-if (lambda (row) (assoc (car row) current)) incoming))
+        (changed
+         (cl-loop for row in incoming
+                  for old = (assoc (car row) current)
+                  when (and old (not (equal row old)))
+                  collect
+                  (append (seq-take row 3)
+                          (list
+                           (cl-loop for name in gnosis-import--content-fields
+                                    for before in (cdr old)
+                                    for after in (cdr row)
+                                    unless (equal before after)
+                                    collect (list name before after)))))))
+    (list (mapcar (lambda (row) (seq-take row 3)) new) changed)))
+
+(defun gnosis-import--destination-state (db ids)
+  "Return DB identity and relevant content state for IDS."
+  (let ((rows (gnosis-import--content-rows db "main" ids)))
+    (list db (mapcar (lambda (id) (cons id (assoc id rows))) ids))))
+
+(defun gnosis-import--diff-snapshot (file)
+  "Compute an import preview from immutable snapshot FILE.
+Return (NEW-ROWS CHANGED-ROWS DESTINATION DETAILS), where new rows are
+\(ID TYPE KEIMENON), changed rows append a list of (FIELD OLD NEW) entries,
+DESTINATION pins the database and only the content to be overwritten,
+and DETAILS retains (ID CURRENT INCOMING) entries for those same IDs."
+  (gnosis-import--format-version file)
+  (let ((db (gnosis--ensure-db)))
+    (sqlite-execute db "ATTACH DATABASE ? AS import_db" (list file))
+    (unwind-protect
+        (gnosis-sqlite-with-transaction db
+          (gnosis-import--format-version-in-db db "import_db")
+          (let* ((ids (mapcar #'car (sqlite-select
+                                    db "SELECT id FROM import_db.themata ORDER BY id")))
+                 (incoming (gnosis-import--content-rows db "import_db" ids))
+                 (current (gnosis-import--content-rows db "main" ids))
+                 (plan (gnosis-import--change-plan incoming current))
+                 (reviewed-ids (mapcar #'car (append (car plan) (cadr plan)))))
+            (append plan
+                    (list (gnosis-import--destination-state db reviewed-ids)
+                          (mapcar (lambda (id)
+                                    (list id (assoc id current) (assoc id incoming)))
+                                  reviewed-ids)))))
+      (sqlite-execute db "DETACH DATABASE import_db"))))
 
 (defun gnosis-import--diff (file)
-  "Compute diff between import FILE and main gnosis database.
-Returns (NEW-ROWS CHANGED-ROWS).
-NEW-ROWS: each is (ID TYPE KEIMENON).
-CHANGED-ROWS: each is (ID TYPE KEIMENON CHANGED-FIELDS-STRING)."
-  (let* ((db (gnosis--ensure-db))
-         (sanitized (gnosis-import--sanitize-path file))
-         new-rows changed-rows)
-    (gnosis-sqlite-execute
-     db (format "ATTACH DATABASE '%s' AS import_db"
-                sanitized))
+  "Compute reviewed import diff and source identity from FILE."
+  (let ((snapshot (make-temp-file "gnosis-import-diff-" nil ".db")))
     (unwind-protect
         (progn
-          ;; New themata: in import but not in main
-          (setq new-rows
-                (mapcar
-                 (lambda (row)
-                   (list (car row)
-                         (gnosis-sqlite--decode (nth 1 row))
-                         (gnosis-sqlite--decode (nth 2 row))))
-                 (sqlite-select db
-                                "SELECT i.id, i.type, i.keimenon FROM import_db.themata i \
-WHERE i.id NOT IN (SELECT id FROM themata)")))
-          ;; Changed themata: single query checking all dimensions
-          ;; Flags: 3=type 4=keimenon 5=hypothesis 6=answer 7=parathema 8=tags
-          (let ((raw-changed
-                 (sqlite-select db
-                                "SELECT i.id, i.type, i.keimenon, \
-CASE WHEN i.type != t.type THEN 1 ELSE 0 END, \
-CASE WHEN i.keimenon != t.keimenon THEN 1 ELSE 0 END, \
-CASE WHEN i.hypothesis != t.hypothesis THEN 1 ELSE 0 END, \
-CASE WHEN i.answer != t.answer THEN 1 ELSE 0 END, \
-CASE WHEN COALESCE(ie.parathema, '') != COALESCE(e.parathema, '') THEN 1 ELSE 0 END, \
-CASE WHEN COALESCE((SELECT GROUP_CONCAT(tag) FROM \
-  (SELECT tag FROM import_db.thema_tag WHERE thema_id = i.id ORDER BY tag)), '') \
-!= COALESCE((SELECT GROUP_CONCAT(tag) FROM \
-  (SELECT tag FROM thema_tag WHERE thema_id = i.id ORDER BY tag)), '') THEN 1 ELSE 0 END \
-FROM import_db.themata i \
-INNER JOIN themata t ON i.id = t.id \
-LEFT JOIN import_db.extras ie ON i.id = ie.id \
-LEFT JOIN extras e ON i.id = e.id \
-WHERE i.type != t.type OR i.keimenon != t.keimenon \
-OR i.hypothesis != t.hypothesis OR i.answer != t.answer \
-OR COALESCE(ie.parathema, '') != COALESCE(e.parathema, '') \
-OR COALESCE((SELECT GROUP_CONCAT(tag) FROM \
-  (SELECT tag FROM import_db.thema_tag WHERE thema_id = i.id ORDER BY tag)), '') \
-!= COALESCE((SELECT GROUP_CONCAT(tag) FROM \
-  (SELECT tag FROM thema_tag WHERE thema_id = i.id ORDER BY tag)), '')")))
-            (setq changed-rows
-                  (mapcar
-                   (lambda (row)
-                     (list (car row)
-                           (gnosis-sqlite--decode (nth 1 row))
-                           (gnosis-sqlite--decode (nth 2 row))
-                           (gnosis-import--changed-fields row)))
-                   raw-changed))))
-      (gnosis-sqlite-execute db "DETACH DATABASE import_db"))
-    (list new-rows changed-rows)))
+          (copy-file file snapshot t)
+          (let ((source-id (gnosis-import--file-sha256 snapshot))
+                (diff (gnosis-import--diff-snapshot snapshot)))
+            (list (car diff) (cadr diff) source-id (nth 2 diff) (nth 3 diff))))
+      (when (file-exists-p snapshot)
+        (delete-file snapshot)))))
 
 (defun gnosis-import--render-diff (new-rows changed-rows)
   "Render diff entries in current tabulated-list buffer.
 NEW-ROWS: (ID TYPE KEIMENON).
-CHANGED-ROWS: (ID TYPE KEIMENON FIELDS)."
+CHANGED-ROWS: (ID TYPE KEIMENON CHANGES), with (FIELD OLD NEW) changes."
   (setq tabulated-list-entries
         (append
          (mapcar (lambda (row)
@@ -513,7 +733,7 @@ CHANGED-ROWS: (ID TYPE KEIMENON FIELDS)."
                           (truncate-string-to-width
                            (or (nth 2 row) "")
                            40 nil nil t))
-                         (fields (or (nth 3 row) "")))
+                         (fields (mapconcat #'car (nth 3 row) ", ")))
                      (list id (vector
                                (propertize
                                 "CHANGED" 'face
@@ -525,122 +745,100 @@ CHANGED-ROWS: (ID TYPE KEIMENON FIELDS)."
                  changed-rows)))
   (tabulated-list-print t))
 
-(defun gnosis-import--apply-changes (file new-ids
-					  changed-ids)
-  "Apply import from FILE: insert NEW-IDS, update
-CHANGED-IDS."
-  (let* ((db (gnosis--ensure-db))
-         (sanitized (gnosis-import--sanitize-path file))
-         (today (gnosis--date-to-int
-                 (gnosis-algorithm-date))))
-    (gnosis-sqlite-execute
-     db (format "ATTACH DATABASE '%s' AS import_db"
-                sanitized))
+(defun gnosis-import--write-changes (db new-ids changed-ids today)
+  "Write NEW-IDS and CHANGED-IDS from the attached import database on DB.
+Initialize new study state for TODAY.  The caller owns the transaction."
+  (gnosis-sqlite-execute-batch
+   db (format "INSERT INTO themata (id, type, keimenon, hypothesis, answer, accepted_aliases)
+       SELECT id, type, keimenon, hypothesis, answer, %s FROM import_db.themata
+        WHERE id IN (%%s)" (gnosis-import--alias-column db "import_db"))
+   new-ids)
+  (gnosis-sqlite-execute-batch
+   db (format "UPDATE themata SET
+       (type, keimenon, hypothesis, answer, accepted_aliases) =
+         (SELECT type, keimenon, hypothesis, answer, %s FROM import_db.themata i
+           WHERE i.id = themata.id)
+       WHERE id IN (%%s)" (gnosis-import--alias-column db "import_db"))
+   changed-ids)
+  (let ((ids (append new-ids changed-ids)))
+    ;; Replace optional rows as well as values; never touch study history.
+    (gnosis-sqlite-execute-batch
+     db "DELETE FROM extras WHERE id IN (%s)" changed-ids)
+    (gnosis-sqlite-execute-batch
+     db "INSERT INTO extras (id, parathema, review_image)
+         SELECT id, parathema, review_image FROM import_db.extras
+          WHERE id IN (%s)"
+     ids)
+    (gnosis-sqlite-execute-batch
+     db "DELETE FROM thema_tag WHERE thema_id IN (%s)" changed-ids)
+    (gnosis-sqlite-execute-batch
+     db "INSERT OR IGNORE INTO thema_tag (thema_id, tag)
+         SELECT thema_id, tag FROM import_db.thema_tag WHERE thema_id IN (%s)"
+     ids)
+    (when new-ids
+      (gnosis-scheduler-initialize-themata
+       (mapcar (lambda (id) (list id today 0)) new-ids) db))
+    (gnosis-sqlite-execute-batch
+     db "DELETE FROM thema_links WHERE source IN (%s)" changed-ids)
+    (dolist (row (gnosis-import--content-rows db "main" ids))
+      (dolist (link (gnosis--thema-expected-links (or (nth 2 row) "")
+                                                 (or (nth 5 row) "")))
+        (gnosis-sqlite-execute
+         db "INSERT INTO thema_links (source, dest) VALUES (?, ?)"
+         (list (car row) link))))))
+
+(defun gnosis-import--apply-snapshot (file new-ids changed-ids &optional destination)
+  "Apply NEW-IDS and CHANGED-IDS from immutable snapshot FILE.
+When DESTINATION is non-nil, revalidate the reviewed destination state
+inside the write transaction before applying any change."
+  (let ((db (gnosis--ensure-db))
+        (today (gnosis--date-to-int (gnosis-date)))
+        attached)
     (unwind-protect
-        (gnosis-sqlite-with-transaction db
-          ;; Insert new themata
-          (when new-ids
-            (gnosis-sqlite-execute-batch db
-                                         "INSERT INTO themata (id, type, keimenon, hypothesis, answer) \
-SELECT id, type, keimenon, hypothesis, answer FROM import_db.themata WHERE id IN (%s)"
-                                         new-ids)
-            (gnosis-sqlite-execute-batch db
-                                         "INSERT OR IGNORE INTO extras (id, parathema, review_image) \
-SELECT id, parathema, review_image FROM import_db.extras WHERE id IN (%s)"
-                                         new-ids)
-            (gnosis-sqlite-execute-batch db
-                                         "INSERT OR IGNORE INTO thema_tag (thema_id, tag) \
-SELECT thema_id, tag FROM import_db.thema_tag WHERE thema_id IN (%s)"
-                                         new-ids)
-            ;; Initialize review state for new themata
-            (let ((gnosis-val
-                   (prin1-to-string
-                    gnosis-algorithm-gnosis-value))
-                  (amnesia-val
-                   (prin1-to-string
-                    gnosis-algorithm-amnesia-value)))
-              (gnosis-sqlite-execute-batch db
-                                           (format "INSERT OR IGNORE INTO review (id, gnosis, amnesia) \
-SELECT id, '%s', '%s' FROM import_db.themata WHERE id IN (%%s)"
-                                                   gnosis-val amnesia-val)
-                                           new-ids))
-            (gnosis-sqlite-execute-batch db
-                                         (format "INSERT OR IGNORE INTO review_log \
-(id, last_rev, next_rev, c_success, t_success, c_fails, t_fails, suspend, n) \
-SELECT id, 0, %d, 0, 0, 0, 0, 0, 0 FROM import_db.themata WHERE id IN (%%s)"
-                                                 today)
-                                         new-ids)
-            ;; Sync thema-links for new themata
-            (dolist (id new-ids)
-              (let* ((keimenon
-                      (caar (gnosis-select
-                             'keimenon 'themata
-                             `(= id ,id))))
-                     (parathema
-                      (caar (gnosis-select
-                             'parathema 'extras
-                             `(= id ,id))))
-                     (links
-                      (gnosis--thema-expected-links
-                       (or keimenon "")
-                       (or parathema ""))))
-                (dolist (link links)
-                  (gnosis--insert-into
-                   'thema-links `([,id ,link]))))))
-          ;; Update changed themata
-          (when changed-ids
-            ;; Update themata content
-            (gnosis-sqlite-execute-batch db
-                                         "UPDATE themata SET \
-type = (SELECT type FROM import_db.themata WHERE import_db.themata.id = themata.id), \
-keimenon = (SELECT keimenon FROM import_db.themata WHERE import_db.themata.id = themata.id), \
-hypothesis = (SELECT hypothesis FROM import_db.themata WHERE import_db.themata.id = themata.id), \
-answer = (SELECT answer FROM import_db.themata WHERE import_db.themata.id = themata.id) \
-WHERE id IN (%s)"
-                                         changed-ids)
-            ;; Update extras
-            (gnosis-sqlite-execute-batch db
-                                         "UPDATE extras SET \
-parathema = (SELECT parathema FROM import_db.extras WHERE import_db.extras.id = extras.id) \
-WHERE id IN (%s)"
-                                         changed-ids)
-            ;; Replace tags: delete old, insert new
-            (gnosis-sqlite-execute-batch db
-                                         "DELETE FROM thema_tag WHERE thema_id IN (%s)"
-                                         changed-ids)
-            (gnosis-sqlite-execute-batch db
-                                         "INSERT OR IGNORE INTO thema_tag (thema_id, tag) \
-SELECT thema_id, tag FROM import_db.thema_tag WHERE thema_id IN (%s)"
-                                         changed-ids)
-            ;; Re-sync thema-links from updated keimenon/parathema
-            (gnosis-sqlite-execute-batch db
-                                         "DELETE FROM thema_links WHERE source IN (%s)"
-                                         changed-ids)
-            (dolist (id changed-ids)
-              (let* ((keimenon
-                      (caar (gnosis-select
-                             'keimenon 'themata
-                             `(= id ,id))))
-                     (parathema
-                      (caar (gnosis-select
-                             'parathema 'extras
-                             `(= id ,id))))
-                     (links
-                      (gnosis--thema-expected-links
-                       (or keimenon "")
-                       (or parathema ""))))
-                (dolist (link links)
-                  (gnosis--insert-into
-                   'thema-links `([,id ,link])))))))
-      (gnosis-sqlite-execute
-       db "DETACH DATABASE import_db"))))
+        (progn
+          (let ((inhibit-quit t))
+            (sqlite-execute db "ATTACH DATABASE ? AS import_db" (list file))
+            (setq attached t))
+          (gnosis-import--format-version-in-db db "import_db")
+          (gnosis-sqlite-with-transaction db
+            (when (and destination
+                       (not (equal destination
+                                   (gnosis-import--destination-state
+                                    db (append new-ids changed-ids)))))
+              (user-error "Gnosis import destination changed; review the import again"))
+            (gnosis-import--content-rows db "import_db" (append new-ids changed-ids))
+            (gnosis-import--write-changes db new-ids changed-ids today)))
+      (when attached
+        (let ((inhibit-quit t))
+          (sqlite-execute db "DETACH DATABASE import_db"))))))
+
+(defun gnosis-import--apply-changes
+    (file new-ids changed-ids source-id &optional destination)
+  "Import from reviewed FILE pinned by SOURCE-ID.
+Insert NEW-IDS and update CHANGED-IDS.  When DESTINATION is non-nil,
+require the reviewed database and content rows to be unchanged."
+  (unless (and (stringp source-id)
+               (string-match-p "\\`[0-9a-f]\\{64\\}\\'" source-id))
+    (error "Invalid Gnosis import source identity"))
+  (let ((snapshot (make-temp-file "gnosis-import-source-" nil ".db")))
+    (unwind-protect
+        (progn
+          (copy-file file snapshot t)
+          (unless (equal source-id (gnosis-import--file-sha256 snapshot))
+            (error "Gnosis import source changed after review"))
+          (gnosis-import--format-version snapshot)
+          (gnosis-import--apply-snapshot snapshot new-ids changed-ids destination))
+      (when (file-exists-p snapshot)
+        (delete-file snapshot)))))
 
 (defun gnosis-import-apply ()
-  "Apply all changes from the import diff."
+  "Apply the complete import diff."
   (interactive nil gnosis-import-diff-mode)
   (let ((new-ids gnosis-import--new-ids)
         (changed-ids gnosis-import--changed-ids)
-        (file gnosis-import--file))
+        (file gnosis-import--file)
+        (source-id gnosis-import--source-id)
+        (destination gnosis-import--destination))
     (unless (or new-ids changed-ids)
       (user-error "No changes to apply"))
     (unless (y-or-n-p
@@ -648,8 +846,10 @@ SELECT thema_id, tag FROM import_db.thema_tag WHERE thema_id IN (%s)"
                      (length new-ids)
                      (length changed-ids)))
       (user-error "Import cancelled"))
+    (unless destination
+      (user-error "Missing import destination; review the import again"))
     (gnosis-import--apply-changes
-     file new-ids changed-ids)
+     file new-ids changed-ids source-id destination)
     (gnosis-import--commit
      (length new-ids) (length changed-ids)
      (file-name-nondirectory file))
@@ -657,120 +857,54 @@ SELECT thema_id, tag FROM import_db.thema_tag WHERE thema_id IN (%s)"
              (length new-ids) (length changed-ids))
     (quit-window t)))
 
-(defun gnosis-import--insert-field (label old new)
+(defun gnosis-import--field-text (value)
+  "Return display text for VALUE without conflating nil and empty strings."
+  (if (equal value "") "\"\"" (format "%s" value)))
+
+(defun gnosis-import--insert-field (label old new &optional new-p)
   "Insert field LABEL comparing OLD and NEW values.
-When OLD is nil, just display NEW (for new themata)."
-  (insert (propertize (format "%s:\n" label)
-                      'face 'bold))
-  (let ((old-s (format "%s" (or old "")))
-        (new-s (format "%s" (or new ""))))
+When NEW-P is non-nil, display only NEW for a newly imported thema."
+  (insert (propertize (format "%s:\n" label) 'face 'bold))
+  (let ((old-s (gnosis-import--field-text old))
+        (new-s (gnosis-import--field-text new)))
     (cond
-     ((null old)
-      (insert "  " new-s "\n\n"))
-     ((equal old-s new-s)
-      (insert "  " old-s "\n\n"))
+     (new-p (insert "  " new-s "\n\n"))
+     ((equal old new) (insert "  " old-s "\n\n"))
      (t
       (insert (propertize (concat "  - " old-s "\n")
-                          'face
-                          'gnosis-import-changed-face)
+                          'face 'gnosis-import-changed-face)
               (propertize (concat "  + " new-s "\n\n")
-                          'face
-                          'gnosis-import-new-face))))))
-
-(defun gnosis-import--fetch-detail (db id)
-  "Fetch current and import data for thema ID from DB.
-Assumes import_db is already attached.  Returns a plist."
-  (list
-   :import-row
-   (car (gnosis-sqlite-select db
-                              "SELECT type, keimenon, hypothesis, answer \
-FROM import_db.themata WHERE id = ?" (list id)))
-   :import-extra
-   (caar (gnosis-sqlite-select db
-                               "SELECT parathema FROM import_db.extras WHERE id = ?"
-                               (list id)))
-   :import-tags
-   (sort (mapcar #'car
-                 (gnosis-sqlite-select db
-                                       "SELECT tag FROM import_db.thema_tag \
-WHERE thema_id = ?" (list id)))
-         #'string<)
-   :current-row
-   (car (gnosis-sqlite-select db
-                              "SELECT type, keimenon, hypothesis, answer \
-FROM themata WHERE id = ?" (list id)))
-   :current-extra
-   (caar (gnosis-sqlite-select db
-                               "SELECT parathema FROM extras WHERE id = ?"
-                               (list id)))
-   :current-tags
-   (sort (mapcar #'car
-                 (gnosis-sqlite-select db
-                                       "SELECT tag FROM thema_tag \
-WHERE thema_id = ?" (list id)))
-         #'string<)))
+                          'face 'gnosis-import-new-face))))))
 
 (defun gnosis-import--render-detail (id status data)
-  "Render detail buffer for thema ID with STATUS using
-DATA plist."
-  (let* ((current-row (or (plist-get data :current-row)
-                          '(nil nil nil nil)))
-         (import-row (plist-get data :import-row))
-         (fields '("Type" "Keimenon" "Hypothesis" "Answer"))
-         (inhibit-read-only t))
+  "Render detail buffer for thema ID with STATUS using content DATA.
+DATA contains current and imported rows from `gnosis-import--content-rows'."
+  (let ((current (car data))
+        (incoming (cadr data))
+        (inhibit-read-only t))
     (erase-buffer)
-    (insert (propertize
-             (format "Thema %d  [%s]\n\n" id status)
-             'face 'bold))
-    (cl-loop for field in fields
-             for old in current-row
-             for new in import-row
+    (insert (propertize (format "Thema %d  [%s]\n\n" id status) 'face 'bold))
+    (cl-loop for name in gnosis-import--content-fields
+             for index from 1
              do (gnosis-import--insert-field
-                 field old new))
-    (gnosis-import--insert-field
-     "Parathema"
-     (plist-get data :current-extra)
-     (plist-get data :import-extra))
-    (gnosis-import--insert-field
-     "Tags"
-     (when (plist-get data :current-tags)
-       (mapconcat #'identity
-                  (plist-get data :current-tags)
-                  ", "))
-     (mapconcat #'identity
-                (plist-get data :import-tags)
-                ", "))
+                 (capitalize (string-replace "_" " " name))
+                 (nth index current) (nth index incoming) (null current)))
     (goto-char (point-min))
     (special-mode)))
 
 (defun gnosis-import-view-detail ()
-  "Show detailed diff for the thema at point."
+  "Show the retained, reviewed diff for the thema at point."
   (interactive nil gnosis-import-diff-mode)
   (let* ((id (tabulated-list-get-id))
-         (status (substring-no-properties
-                  (aref (tabulated-list-get-entry) 0)))
-         (db (gnosis--ensure-db))
-         (sanitized (gnosis-import--sanitize-path
-                     gnosis-import--file))
-         (data nil))
-    (gnosis-sqlite-execute
-     db (format "ATTACH DATABASE '%s' AS import_db"
-                sanitized))
-    (unwind-protect
-        (setq data
-              (gnosis-import--fetch-detail db id))
-      (gnosis-sqlite-execute
-       db "DETACH DATABASE import_db"))
+         (data (cdr (assoc id gnosis-import--details))))
+    (unless data
+      (user-error "No reviewed thema at point"))
     (let ((buf (get-buffer-create
                 "*Gnosis Import Detail*")))
       (with-current-buffer buf
         (gnosis-import--render-detail
-         id status data))
+         id (if (car data) "CHANGED" "NEW") data))
       (display-buffer buf))))
-
-;; Declared for the byte compiler: `keymap-popup-define' references the
-;; variable in generated functions before its `defvar-keymap' form.
-(defvar gnosis-import-diff-mode-map)
 
 (keymap-popup-define gnosis-import-diff-mode-map
   "Import Review"
@@ -821,7 +955,8 @@ Shows a diff buffer for review before applying."
       (user-error "File does not exist: %s" file))
     (let* ((diff (gnosis-import--diff file))
            (new-rows (car diff))
-           (changed-rows (cadr diff)))
+           (changed-rows (cadr diff))
+           (source-id (nth 2 diff)))
       (if (and (null new-rows) (null changed-rows))
           (message "No new or changed themata in %s"
                    file)
@@ -830,6 +965,9 @@ Shows a diff buffer for review before applying."
           (with-current-buffer buf
             (gnosis-import-diff-mode)
             (setq gnosis-import--file file)
+            (setq gnosis-import--source-id source-id)
+            (setq gnosis-import--destination (nth 3 diff))
+            (setq gnosis-import--details (nth 4 diff))
             (setq gnosis-import--new-ids
                   (mapcar #'car new-rows))
             (setq gnosis-import--changed-ids

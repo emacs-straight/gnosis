@@ -8,7 +8,6 @@
 
 ;; Version: 0.0.1
 
-;; Package-Requires: ((emacs "27.2"))
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -63,7 +62,7 @@ Optionally, use custom DEFAULT-FACE."
 
 (defconst gnosis-utils--org-link-re
   "\\[\\[[^]]*\\]\\[[^]]*\\]\\]\\|\\[\\[[^]]*\\]\\]"
-  "Regexp matching org-mode links: [[target][desc]] or [[target]].")
+  "Regexp matching Org mode links: [[target][desc]] or [[target]].")
 
 (defun gnosis-utils-string-outside-links-p (text string)
   "Return non-nil if STRING appears in TEXT outside of org-links."
