@@ -1,4 +1,4 @@
-                                                              2026/09/14
+                                                   2026/09/15 2026/09/14
 
 
 ⁃ [Homepage]
@@ -13,10 +13,60 @@
 [Changelog] <https://thanosapollo.org/log/gnosis/>
 
 
-1 0.11.0
+1 0.12.0
 ════════
 
-1.1 Breaking changes and upgrading
+1.1 Upgrading
+─────────────
+
+  ⁃ Upgrade released schema 9 to schema 10 to retain practice encounter
+    evidence.  Released 0.10.6 databases still upgrade through schema 9.
+    Existing content, schedules and study history are preserved; missing
+    historical answers are not invented.
+  ⁃ Back up before the first database open with this version.
+    Downgrading to 0.11.0 requires its matching pre-upgrade database
+    backup, not a schema-10 database.
+
+
+1.2 Fixes
+─────────
+
+  ⁃ Populate dashboard statistics on first startup without requiring a
+    previous review session to load their implementation.
+  ⁃ Refuse native thema saves that would discard explanation headings or
+    prose outside fields.  Preserve the complete draft and source links,
+    including when the editor is narrowed.
+  ⁃ Preserve file-level Org IDs and adjacent source/example blocks when
+    inserting the first file tag.
+  ⁃ Retire study collection and dashboard ownership when their buffers
+    become files.  Refresh and retained commands cannot erase successor
+    drafts or reuse retired selections after detachment.
+  ⁃ Keep dashboard study actions and pending-review Delete, Suspend and
+    Flag actions bound to the database and presentation that produced
+    them, including across prompts.
+
+
+1.3 Practice and journals
+─────────────────────────
+
+  ⁃ Retain accepted practice answers and context, support an explicit
+    unlimited-attempt policy, and recover current practice sessions
+    without changing scheduled-review evidence or FSRS state.
+  ⁃ Add optional journal templates and free-form capture through
+    `gnosis-journal-insert-template' and `gnosis-journal-capture'.
+    Thoughts can be edited before saving; cancellation leaves the
+    journal unchanged.
+  ⁃ Route journal captures through explicit local heading roles and
+    reject ambiguous destinations rather than choosing an unrelated
+    heading.
+  ⁃ Improve the bundled demo collection and remove stale ELPA ignore
+    entries.
+
+
+2 0.11.0
+════════
+
+2.1 Breaking changes and upgrading
 ──────────────────────────────────
 
   ⁃ Replace the previous scheduling algorithm with FSRS-6.  Remove the
@@ -45,7 +95,7 @@
     explicit, confirmed completion through source ID links.
 
 
-1.2 Scheduling and review
+2.2 Scheduling and review
 ─────────────────────────
 
   ⁃ Use FSRS-6 with binary Again/Good outcomes and an initial desired
@@ -57,42 +107,4 @@
     scheduled recall, same-day activity, practice exposures and voided
     grades.
   ⁃ Bound failure relearning: a failed thema returns once at the end of
-    the batch rather than extending it indefinitely.  Same-day reviews
-    use the FSRS short-term update; calendar intervals remain at least a
-    day.
-  ⁃ Use a shared logical review day for scheduling and daily activity.
-    Configure the day boundary with `gnosis-day-start-hour'; the old
-    `gnosis-algorithm-day-start-hour' name remains an obsolete alias.
-  ⁃ Basic themata support optional self-grading with
-    `gnosis-review-basic-input' set to `self-grade'.  Recall first,
-    reveal the answer, then choose the binary result.  Typed matching
-    remains available; the selected input style survives session resume.
-  ⁃ Editing after an answer, followed by save or cancel, returns to the
-    same review actions.  Edits affect future presentations without
-    regrading the pending answer; use the explicit override to change
-    it.
-
-
-1.3 Topic study and saved sessions
-──────────────────────────────────
-
-  ⁃ Add `gnosis-practice-topic' for study without rescheduling and
-    `gnosis-review-due-topic' for due-only topic review.  Select
-    multiple topics and optionally expand through forward links and
-    backlinks.  `gnosis-study-subtree' selects source nodes within an
-    Org subtree.
-  ⁃ Practice retains its own timestamped attempts but never changes FSRS
-    state or due dates.  The existing `gnosis-review-topic' command
-    remains schedule-affecting review ahead, not non-rescheduling
-    practice.
-  ⁃ Resume unfinished batches after interruption or an Emacs restart
-    with `gnosis-review-resume'.  Continue selects another batch;
-    discard removes saved progress but preserves accepted evidence.  A
-    new nonempty batch ends the old one early without losing its
-    accepted results.
-  ⁃ `gnosis-review-undo' corrects the last accepted grade outside active
-    review.  Scheduled undo reconstructs the schedule; practice undo
-    leaves FSRS untouched.  This is a single correction, not a
-    multi-step history.
-  ⁃ Add topic and repair collections through `gnosis-study-topic' and
   …  …

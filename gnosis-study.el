@@ -32,7 +32,7 @@
 (require 'keymap-popup)
 (require 'tabulated-list)
 
-(declare-function gnosis-review-loop "gnosis-review" (collector &optional mode target))
+(declare-function gnosis-review-loop "gnosis-review" (collector &optional mode target validate))
 (declare-function gnosis-review--session-target "gnosis-review" ())
 (declare-function gnosis-review-resume "gnosis-review" ())
 (declare-function gnosis-review-undo "gnosis-review" (&optional event-id correction-id))
@@ -120,14 +120,17 @@ Due and new counts include only active items; new can also be due."
           :new (seq-count (lambda (row) (zerop (car row))) active)
           :due due :not-due (- (length active) due))))
 
-(defun gnosis-study--start (nodes mode &optional fwd back target)
+(defun gnosis-study--start (nodes mode &optional fwd back target validate)
   "Preview and start a finite batch for NODES in MODE using FWD/BACK depths.
 Read topics when NODES is nil.  Optional TARGET is the database/checkpoint
-captured before earlier prompts, otherwise capture it before collecting."
+captured before earlier prompts, otherwise capture it before collecting.
+Optional VALIDATE checks the caller before selection and batch replacement."
   (require 'gnosis-review)
   (when gnosis-review--running (user-error "Finish the active review first"))
+  (when validate (funcall validate))
   (let* ((target (or target (gnosis-review--session-target)))
          (nodes (or nodes (gnosis-study-read-topics)))
+         (_ (when validate (funcall validate)))
          (ids (gnosis-study-topic-ids nodes (eq mode 'due) fwd back))
          (counts (gnosis-study-composition ids))
          (candidates (gnosis-study-topic-candidates nodes))
@@ -144,14 +147,15 @@ captured before earlier prompts, otherwise capture it before collecting."
                      (if (or (> (or fwd 0) 0) (> (or back 0) 0))
                          (format " Link depth: %d forward, %d backward." (or fwd 0) (or back 0))
                        "")))
-        (gnosis-review-loop (gnosis-shuffle ids) mode target)))))
+        (gnosis-review-loop (gnosis-shuffle ids) mode target validate)))))
 
 ;;;###autoload
-(defun gnosis-practice-topic (&optional nodes fwd back target)
+(defun gnosis-practice-topic (&optional nodes fwd back target validate)
   "Practise NODES without rescheduling, including new and not-due themata.
 NODES is a list of Org IDs.  Interactively select topics; with a prefix,
 prompt for bounded FWD and BACK graph depths.  Retry each failure at most once.
-Optional TARGET is the database/checkpoint captured before earlier prompts."
+Optional TARGET is the database/checkpoint captured before earlier prompts.
+Optional VALIDATE checks caller ownership before selection and replacement."
   (interactive
    (progn
      (require 'gnosis-review)
@@ -160,14 +164,15 @@ Optional TARGET is the database/checkpoint captured before earlier prompts."
              (when current-prefix-arg (read-number "Forward depth: " 0))
              (when current-prefix-arg (read-number "Backlink depth: " 0))
              target))))
-  (gnosis-study--start nodes 'practice fwd back target))
+  (gnosis-study--start nodes 'practice fwd back target validate))
 
 ;;;###autoload
-(defun gnosis-review-due-topic (&optional nodes fwd back target)
+(defun gnosis-review-due-topic (&optional nodes fwd back target validate)
   "Review due themata of NODES with normal FSRS acceptance.
 NODES is a list of Org IDs.  FWD and BACK optionally expand graph selection.
 This explicit topic batch is not capped by the daily new-item limit.
-Optional TARGET is the database/checkpoint captured before earlier prompts."
+Optional TARGET is the database/checkpoint captured before earlier prompts.
+Optional VALIDATE checks caller ownership before selection and replacement."
   (interactive
    (progn
      (require 'gnosis-review)
@@ -176,7 +181,7 @@ Optional TARGET is the database/checkpoint captured before earlier prompts."
              (when current-prefix-arg (read-number "Forward depth: " 0))
              (when current-prefix-arg (read-number "Backlink depth: " 0))
              target))))
-  (gnosis-study--start nodes 'due fwd back target))
+  (gnosis-study--start nodes 'due fwd back target validate))
 
 ;;;###autoload
 (defun gnosis-study-subtree (&optional due)
@@ -194,11 +199,32 @@ Include the enclosing source ID and descendant IDs, without graph traversal."
     (gnosis-study--start (delete-dups (delq nil (cons owner ids)))
                          (if due 'due 'practice))))
 
+(defun gnosis-study--check-encounter (data)
+  "Validate optional versioned practice encounter DATA and return it.
+Nil means historical or unobservable evidence, never reconstructed content."
+  (when data
+    (unless (and (proper-list-p data) (zerop (% (length data) 2))
+                 (equal (plist-get data :version) 1)
+                 (stringp (plist-get data :kind))
+                 (stringp (plist-get data :prompt))
+                 (seq-every-p (lambda (key) (vectorp (plist-get data key)))
+                              '(:hypothesis :expected-answers :accepted-aliases
+                                :hints-available :hints-shown))
+                 (member (plist-get data :original-outcome) '("success" "failure"))
+                 (plist-member data :response)
+                 (plist-member data :coaching)
+                 (plist-member data :parathema))
+      (error "Unsupported practice encounter format"))
+    ;; Reject nonportable objects rather than retain unreadable encounter data.
+    (ignore (json-serialize data :false-object :false :null-object nil)))
+  data)
+
 (defun gnosis-study-accept-practice (result)
   "Accept pending practice RESULT idempotently, without scheduler writes.
 Reject reuse of an encounter identity with different facts.  Retain evidence
 until hard thema deletion.  Content exports exclude all study evidence."
   (let* ((db (gnosis--ensure-db))
+         (encounter (gnosis-study--check-encounter (plist-get result :encounter)))
          (row (list (plist-get result :event-id) (plist-get result :thema-id)
                     (plist-get result :session-id) (plist-get result :attempt)
                     (plist-get result :reviewed-at-us)
@@ -218,10 +244,16 @@ until hard thema deletion.  Content exports exclude all study evidence."
         (when (gnosis-get 'event-id 'practice-voids `(= event-id ,(car row)))
           (error "Practice encounter was voided"))
         (if existing
-            (unless (equal existing row) (error "Practice identity conflict"))
+            (unless (and (equal existing row)
+                         (equal encounter (gnosis-get 'data 'practice-encounters
+                                                       `(= event-id ,(car row)))))
+              (error "Practice identity conflict"))
           (unless (gnosis-get 'id 'themata `(= id ,(nth 1 row)))
             (user-error "Thema was deleted before acceptance"))
-          (gnosis-sqlite-execute db "INSERT INTO practice_events VALUES (?, ?, ?, ?, ?, ?)" row))))
+          (gnosis-sqlite-execute db "INSERT INTO practice_events VALUES (?, ?, ?, ?, ?, ?)" row)
+          (when encounter
+            (gnosis-sqlite-execute db "INSERT INTO practice_encounters VALUES (?, ?)"
+                                   (list (car row) encounter))))))
     (list :event-id (car row) :rating (nth 5 row))))
 
 (defun gnosis-study--practice-day-events (date)
@@ -293,16 +325,24 @@ to queue completion, not mastery.  Hard thema deletion removes its events."
        LEFT JOIN study_history h ON h.session_id = e.session_id
       GROUP BY e.session_id ORDER BY MIN(e.reviewed_at_us), e.session_id")))
 
-(defun gnosis-study-practice-events (session-id)
+(defun gnosis-study-practice-events (session-id &optional encounters)
   "Return recorded practice events and corrections for exact SESSION-ID.
 Rows contain event ID, thema ID, session ID, attempt ordinal, timestamp in
 microseconds, rating, and correction ID (nil for effective evidence).
+With ENCOUNTERS, append captured answer/context data, or nil when unavailable.
 Order by the session-wide attempt ordinal; never infer grades from a queue."
-  (gnosis-sqlite-select
-   (gnosis--ensure-db)
-   "SELECT e.*, v.correction_id FROM practice_events e
-      LEFT JOIN practice_voids v ON v.event_id = e.event_id
-     WHERE e.session_id = ? ORDER BY e.attempt" (list session-id)))
+  (let ((rows (gnosis-sqlite-select
+               (gnosis--ensure-db)
+               (concat "SELECT e.*, v.correction_id"
+                       (when encounters ", c.data")
+                       " FROM practice_events e
+                         LEFT JOIN practice_voids v ON v.event_id = e.event_id "
+                       (when encounters "LEFT JOIN practice_encounters c ON c.event_id = e.event_id ")
+                       "WHERE e.session_id = ? ORDER BY e.attempt")
+               (list session-id))))
+    (when encounters
+      (mapc (lambda (row) (gnosis-study--check-encounter (nth 7 row))) rows))
+    rows))
 
 ;;;###autoload
 (defun gnosis-backup-db (file)
@@ -356,6 +396,7 @@ An explicit OWNER may be checked after source navigation or a prompt."
                  database
                  (with-current-buffer buffer
                    (and (derived-mode-p 'gnosis-study-mode)
+                        (not buffer-file-name)
                         (eq owner gnosis-study--owner))))
       (user-error "Study view is stale; refresh or reopen the collection"))
     owner))
@@ -364,7 +405,9 @@ An explicit OWNER may be checked after source navigation or a prompt."
   "Refresh the collection from the current database, preserving row identity.
 This explicitly adopts the current database for subsequent row commands."
   (interactive)
-  (unless (derived-mode-p 'gnosis-study-mode)
+  (unless (and (derived-mode-p 'gnosis-study-mode)
+               (not buffer-file-name)
+               (or gnosis-study--topic gnosis-study--repair-p))
     (user-error "Open a study collection first"))
   (setq gnosis-study--owner nil)
   (let* ((database (gnosis--ensure-db))
@@ -444,15 +487,19 @@ With IF-AVAILABLE non-nil, do nothing when no indexed source exists."
   "Review due themata of the displayed topic."
   (interactive)
   (unless gnosis-study--topic (user-error "Open a topic first"))
-  (gnosis-study--check-owner)
-  (gnosis-review-due-topic (list gnosis-study--topic)))
+  (let ((owner (gnosis-study--check-owner)))
+    (gnosis-review-due-topic
+     (list gnosis-study--topic) nil nil nil
+     (lambda () (gnosis-study--check-owner owner)))))
 
 (defun gnosis-study-practice ()
   "Practise the displayed topic without rescheduling."
   (interactive)
   (unless gnosis-study--topic (user-error "Open a topic first"))
-  (gnosis-study--check-owner)
-  (gnosis-practice-topic (list gnosis-study--topic)))
+  (let ((owner (gnosis-study--check-owner)))
+    (gnosis-practice-topic
+     (list gnosis-study--topic) nil nil nil
+     (lambda () (gnosis-study--check-owner owner)))))
 
 (defun gnosis-study-toggle-flag ()
   "Toggle needs_work for the thema at point."
@@ -505,12 +552,24 @@ With IF-AVAILABLE non-nil, do nothing when no indexed source exists."
   (interactive)
   (keymap-popup gnosis-study-mode-map))
 
+(defun gnosis-study--retire-collection ()
+  "Retire collection identity when its buffer is repurposed."
+  (setq gnosis-study--owner nil
+        gnosis-study--topic nil
+        gnosis-study--repair-p nil)
+  ;; File association clears this handler without changing the major mode.
+  ;; Keep reverting subject to the retired collection check until mode change.
+  (setq-local revert-buffer-function #'tabulated-list-revert))
+
 (define-derived-mode gnosis-study-mode tabulated-list-mode "Gnosis Study"
   "Study existing topic themata and repair weak questions."
   (setq tabulated-list-format [("Question" 48 t) ("Flag" 12 t)
                                ("Status" 12 t) ("Delayed failures / sample" 26 t)]
         tabulated-list-padding 1)
   (add-hook 'tabulated-list-revert-hook #'gnosis-study-refresh nil t)
+  (add-hook 'after-set-visited-file-name-hook
+            #'gnosis-study--retire-collection nil t)
+  (add-hook 'change-major-mode-hook #'gnosis-study--retire-collection nil t)
   (tabulated-list-init-header))
 
 ;;;###autoload
