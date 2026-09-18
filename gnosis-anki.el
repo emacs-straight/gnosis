@@ -21,7 +21,7 @@
 
 ;;; Commentary:
 
-;; Import Anki deck packages (.apkg) into gnosis.
+;; Import Anki deck packages (.apkg) or collections (.anki2/.anki21).
 ;;
 ;; Supports basic and cloze note types.  Converts HTML markup to
 ;; org-mode equivalents (bold, italic, underline, sub/superscript,
@@ -178,26 +178,16 @@ Returns a list of field name strings in order of first appearance."
       (setq pos (match-end 0)))
     (nreverse fields)))
 
-(defun gnosis-anki--front-back-from-templates (tmpls-arr fields)
-  "Determine front and back field names from TMPLS-ARR.
-FIELDS is the ordered list of all field names in the note type.
-Returns (FRONT-FIELDS . BACK-FIELDS) where each is a list of field
-names.  Uses the first template's qfmt/afmt.  Falls back to first
-field as front, rest as back if templates are unavailable."
-  (if (and tmpls-arr (> (length tmpls-arr) 0))
-      (let* ((tmpl (if (vectorp tmpls-arr)
-                       (aref tmpls-arr 0)
-                     (car tmpls-arr)))
-             (qfmt (or (alist-get 'qfmt tmpl) ""))
-             (afmt (or (alist-get 'afmt tmpl) ""))
-             (q-fields (gnosis-anki--template-fields qfmt))
-             (a-fields (cl-remove-if (lambda (f) (member f q-fields))
-                                     (gnosis-anki--template-fields afmt))))
-        (if (and q-fields a-fields)
-            (cons q-fields a-fields)
-          ;; Templates don't reference known fields, fall back
-          (cons (list (car fields)) (cdr fields))))
-    (cons (list (car fields)) (cdr fields))))
+(defun gnosis-anki--front-back-fields (qfmt afmt fields &optional cloze-p)
+  "Return front/back field names for decoded QFMT, AFMT and ordered FIELDS.
+Remove front references from the back.  When either side has no fields,
+fall back to the first field as front and the remaining fields as back.
+With CLOZE-P, retain explicit front fields even without back-only fields."
+  (let* ((front (gnosis-anki--template-fields (or qfmt "")))
+         (back (cl-remove-if (lambda (field) (member field front))
+                             (gnosis-anki--template-fields (or afmt "")))))
+    (if (and front (or back cloze-p)) (cons front back)
+      (cons (list (car fields)) (cdr fields)))))
 
 (defun gnosis-anki--media-value-p (value)
   "Return non-nil when VALUE consists only of media references, not text."
@@ -300,16 +290,26 @@ Try ZSTD first, fall back to 7Z.  Returns path to decompressed DB."
   "Return t for a converted ANSWER with non-whitespace text."
   (and (stringp answer) (not (string-empty-p (string-trim answer)))))
 
-(defun gnosis-anki--parse-cloze-note (flds tag-str seg-cache seen)
+(defun gnosis-anki--parse-cloze-note (flds tag-str seg-cache seen &optional model-info)
   "Parse a cloze note from FLDS string with TAG-STR.
 SEG-CACHE and SEEN are shared tag-parsing caches.
+MODEL-INFO is this note type's entry from `gnosis-anki--build-model-info';
+when omitted, assume the standard Text, Extra layout.
 Return one plist per usable cloze group and nil per rejected group.
 Return nil if there are no groups.  Keep rejected slots for skip accounting;
 never remove individual answers and shift the remaining hints."
-  (let* ((fields (split-string flds "\x1f"))
+  (let* ((info (or model-info '(1 1 ("Text") ("Extra") "Text" "Extra")))
+         (fields (split-string flds "\x1f"))
+         (names (nthcdr 4 info))
          ;; Extract all source members before HTML conversion and validation.
-         (text (or (nth 0 fields) ""))
-         (extra (gnosis-anki--html-to-org (or (nth 1 fields) "")))
+         (text (mapconcat
+                (lambda (name)
+                  (let ((index (cl-position name names :test #'equal)))
+                    (if index (or (nth index fields) "") "")))
+                (nth 2 info) "\n"))
+         (extra (mapconcat #'identity
+                           (gnosis-anki--resolve-field-values (nth 3 info) names fields)
+                           "\n"))
          (_ (clrhash seen))
          (tags (gnosis-anki--parse-tags tag-str seg-cache seen))
          (contents (gnosis-cloze-extract-contents text))
@@ -407,7 +407,7 @@ MODEL-INFO maps mid strings to
               (cond
                ((eq mtype 'skip) nil)
                ((and mtype (= mtype 1))
-                (gnosis-anki--parse-cloze-note flds tag-str seg-cache seen))
+                (gnosis-anki--parse-cloze-note flds tag-str seg-cache seen info))
                ((and mtype (= mtype 0))
                 (gnosis-anki--parse-basic-note
                  flds (nth 2 info) (nth 3 info) (nthcdr 4 info)
@@ -517,7 +517,9 @@ Values are (mtype tmpl-count front-fields back-fields . all-fields)."
              (tmpl-count (length (append tmpls-arr nil)))
              (fields (mapcar (lambda (f) (alist-get 'name f))
                              (append flds-arr nil)))
-             (fb (gnosis-anki--front-back-from-templates tmpls-arr fields))
+             (tmpl (and (> tmpl-count 0) (elt tmpls-arr 0)))
+             (fb (gnosis-anki--front-back-fields
+                  (alist-get 'qfmt tmpl) (alist-get 'afmt tmpl) fields (eql mtype 1)))
              (mtype-resolved
               (cond
                ((gnosis-anki--image-occlusion-p name fields) 'skip)
@@ -527,16 +529,44 @@ Values are (mtype tmpl-count front-fields back-fields . all-fields)."
                                (car fb) (cdr fb) fields)
                  model-info)))))
 
+(defun gnosis-anki--notetype-kind (config)
+  "Return the note kind encoded in protobuf CONFIG.
+Read Notetype.Config.kind (field 1): 0 means basic and 1 means cloze.
+An omitted kind defaults to basic.  Skip unrelated protobuf fields;
+reject malformed input and unsupported kinds instead of guessing."
+  (let ((bytes (encode-coding-string config 'raw-text))
+        (pos 0)
+        (kind 0))
+    (while (< pos (length bytes))
+      (let* ((tag (gnosis-anki--decode-varint bytes pos))
+             (field (ash (car tag) -3))
+             (wire (logand (car tag) 7)))
+        (setq pos (cdr tag))
+        (when (or (zerop field) (and (= field 1) (/= wire 0)))
+          (user-error "Invalid Anki note type field"))
+        (pcase wire
+          (0 (let ((value (gnosis-anki--decode-varint bytes pos)))
+               (when (= field 1) (setq kind (car value)))
+               (setq pos (cdr value))))
+          (1 (setq pos (+ pos 8)))
+          (2 (let ((size (gnosis-anki--decode-varint bytes pos)))
+               (setq pos (+ (cdr size) (car size)))))
+          (5 (setq pos (+ pos 4)))
+          (_ (user-error "Unsupported Anki note type wire format: %s" wire)))
+        (when (> pos (length bytes))
+          (user-error "Truncated Anki note type configuration"))))
+    (unless (memq kind '(0 1))
+      (user-error "Unsupported Anki note type kind: %s" kind))
+    kind))
+
 (defun gnosis-anki--build-model-info-from-tables (anki-db model-info)
   "Build MODEL-INFO from ANKI-DB using notetypes/fields/templates tables.
 Modern .apkg files store note types in separate tables with protobuf
 config blobs.  Template qfmt/afmt are decoded from the config blob.
-Uses 5 total queries instead of 3N+2.
+Uses 4 total queries instead of 3N+2.  Read the semantic note kind from
+notetypes.config, never from a template's display name.
 Values are (mtype tmpl-count front-fields back-fields . all-fields)."
-  (let ((notetypes (sqlite-select anki-db "SELECT id, name FROM notetypes"))
-        (cloze-ids (mapcar #'car
-			   (sqlite-select anki-db
-					  "SELECT DISTINCT ntid FROM templates WHERE name COLLATE NOCASE = 'Cloze'")))
+  (let ((notetypes (sqlite-select anki-db "SELECT id, name, config FROM notetypes"))
         (all-fields (sqlite-select anki-db
 				   "SELECT ntid, ord, name FROM fields ORDER BY ntid, ord"))
         (all-configs (sqlite-select anki-db
@@ -568,24 +598,11 @@ Values are (mtype tmpl-count front-fields back-fields . all-fields)."
              (config-blob (gethash ntid config-ht))
              (tmpl-count (or (gethash ntid count-ht) 0))
              (decoded (gnosis-anki--decode-template-config config-blob))
-             (fb (if decoded
-                     (let* ((q-fields
-                             (gnosis-anki--template-fields
-                              (car decoded)))
-                            (a-fields
-                             (cl-remove-if
-                              (lambda (f)
-                                (member f q-fields))
-                              (gnosis-anki--template-fields
-                               (cdr decoded)))))
-                       (if (and q-fields a-fields)
-                           (cons q-fields a-fields)
-                         (cons (list (car fields)) (cdr fields))))
-                   (cons (list (car fields)) (cdr fields))))
-             (mtype (cond
-                     ((gnosis-anki--image-occlusion-p name fields) 'skip)
-                     ((member ntid cloze-ids) 1)
-                     (t 0))))
+             (mtype (if (gnosis-anki--image-occlusion-p name fields)
+                        'skip
+                      (gnosis-anki--notetype-kind (nth 2 nt))))
+             (fb (gnosis-anki--front-back-fields
+                  (car decoded) (cdr decoded) fields (eql mtype 1))))
         (puthash mid (cl-list* mtype tmpl-count
                                (car fb) (cdr fb) fields)
                  model-info)))))
@@ -679,44 +696,50 @@ Return the number of themata committed."
         (length pending)))))
 
 (defun gnosis-anki--chunk-insert (db item-chunks id-chunks total skipped
-                                     today cleanup-fn
-                                     source-file
-                                     &optional extra-tag suspend)
+                                   today source-file &optional extra-tag suspend)
   "Insert ITEM-CHUNKS with ID-CHUNKS into DB asynchronously.
 Each chunk commits atomically; SQL writes stay bounded even for a
 large source note.  TOTAL and SKIPPED are progress counts.  TODAY is
-the captured logical review day.  Call CLEANUP-FN with no arguments
-on completion, error or quit.  SOURCE-FILE identifies the import commit.
-Pass EXTRA-TAG and SUSPEND to `gnosis-anki--bulk-insert-chunk'."
-  (let ((imported 0))
+the captured logical review day.  SOURCE-FILE identifies the import commit.
+Pass EXTRA-TAG and SUSPEND to `gnosis-anki--bulk-insert-chunk'.
+Capture the repository beside DB before yielding, independently of
+`gnosis-dir'.  Skip automatic Git for a database not named gnosis.db."
+  (let* ((imported 0)
+         ;; Metadata is optional for Git; report a closed DB through the writer.
+         (file (condition-case nil
+                   (nth 2 (seq-find
+                           (lambda (row) (equal (nth 1 row) "main"))
+                           (sqlite-select db "PRAGMA database_list")))
+                 (error nil)))
+         (directory (and (stringp file) (file-name-absolute-p file)
+                         (equal (file-name-nondirectory file) "gnosis.db")
+                         (file-name-directory file))))
     (cl-labels
         ((process-next (item-rest id-rest)
-           (let (continued)
-             (unwind-protect
-                 (condition-case err
-                     (if (null item-rest)
-                         (progn
-                           (sqlite-execute db "ANALYZE")
-                           (gnosis-anki--commit-import imported source-file)
-                           (message "Anki import complete: %d imported, %d skipped"
-                                    imported skipped))
-                       (let* ((count (gnosis-anki--insert-pending-chunk
-                                      db (car item-rest) (car id-rest)
-                                      today extra-tag suspend))
-                              (duplicates (- (length (car item-rest)) count)))
-                         (setq imported (+ imported count)
-                               skipped (+ skipped duplicates)
-                               total (- total duplicates)))
-                       (message "Importing... %d/%d (%d%%)"
-                                imported total
-                                (if (zerop total) 100 (/ (* 100 imported) total)))
-                       (run-with-timer 0.1 nil #'process-next
-                                       (cdr item-rest) (cdr id-rest))
-                       (setq continued t))
-                   (error
-                    (message "Anki import error after %d themata: %S" imported err)))
-               (unless continued
-                 (when cleanup-fn (funcall cleanup-fn)))))))
+           (condition-case err
+               (if (null item-rest)
+                   (progn
+                     (sqlite-execute db "ANALYZE")
+                     (if directory
+                         (let ((gnosis-dir directory))
+                           (gnosis-anki--commit-import imported source-file))
+                       (message "Anki import: Git skipped; database is not gnosis.db"))
+                     (message "Anki import complete: %d imported, %d skipped"
+                              imported skipped))
+                 (let* ((count (gnosis-anki--insert-pending-chunk
+                                db (car item-rest) (car id-rest)
+                                today extra-tag suspend))
+                        (duplicates (- (length (car item-rest)) count)))
+                   (setq imported (+ imported count)
+                         skipped (+ skipped duplicates)
+                         total (- total duplicates)))
+                 (message "Importing... %d/%d (%d%%)"
+                          imported total
+                          (if (zerop total) 100 (/ (* 100 imported) total)))
+                 (run-with-timer 0.1 nil #'process-next
+                                 (cdr item-rest) (cdr id-rest)))
+             (error
+              (message "Anki import error after %d themata: %S" imported err)))))
       (process-next item-chunks id-chunks))))
 
 (defun gnosis-anki--build-guid-cache ()
@@ -737,7 +760,7 @@ Parses all notes, then bulk-inserts in chunks using timers so
 Emacs stays responsive.  When TMP-P is non-nil, clean up DB-FILE
 and its temp directory after parsing, including on failure.
 EXTRA-TAG is appended to each thema's tags.  SUSPEND imports as
-suspended.  SOURCE-FILE is the original .apkg path for the git commit message."
+suspended.  SOURCE-FILE is the original import path for the Git commit message."
   (let* ((parse-result (unwind-protect
                            (gnosis-anki--parse-anki-db db-file)
                          ;; Prepared notes own all data needed by the timers.
@@ -767,24 +790,25 @@ suspended.  SOURCE-FILE is the original .apkg path for the git commit message."
         (gnosis-anki--chunk-insert
          (gnosis--ensure-db) chunks id-chunks total skipped
          (gnosis--today-int)
-         nil
          (or source-file db-file)
          extra-tag suspend)))))
 
 ;;;###autoload
 (defun gnosis-import-anki (file)
-  "Import Anki deck package FILE (.apkg) into gnosis."
-  (interactive "fAnki deck (.apkg): ")
+  "Import Anki FILE (.apkg, .anki2 or .anki21) into gnosis.
+Direct collection files must be quiescent standalone SQLite databases."
+  (interactive "fAnki file (.apkg, .anki2, .anki21): ")
   (unless (file-exists-p file)
     (user-error "File not found: %s" file))
-  (unless (string-match-p "\\.apkg\\'" file)
-    (user-error "Unsupported file type: %s (only .apkg supported)" file))
+  (unless (member (file-name-extension file) '("apkg" "anki2" "anki21"))
+    (user-error "Unsupported file type: %s (use .apkg, .anki2 or .anki21)" file))
   (let ((extra-tag (let ((tag (read-string
                                "Tag for imported themata (empty to skip): ")))
                      (if (string-empty-p tag) nil tag)))
         (suspend (y-or-n-p "Import as suspended?"))
-        (db-file (gnosis-anki--extract-db file)))
-    (gnosis-anki--import-db db-file t extra-tag suspend file)))
+        (archive-p (equal (file-name-extension file) "apkg")))
+    (gnosis-anki--import-db (if archive-p (gnosis-anki--extract-db file) file)
+                            archive-p extra-tag suspend file)))
 
 (provide 'gnosis-anki)
 ;;; gnosis-anki.el ends here

@@ -871,6 +871,7 @@ Skip missing dates.  Do not create an entry."
   "Append template NAME to the dated entry at point, without saving.
 Prompt for a name from `gnosis-journal-templates' when NAME is nil.
 Expand headings relative to the entry, not the section at point.
+Leave point on a blank line after nonempty templates, within the date.
 Preserve existing text and IDs.  Quit or invalid input inserts nothing."
   (interactive)
   (let* ((date (or (gnosis-journal--date-at-point)
@@ -913,7 +914,11 @@ Preserve existing text and IDs.  Quit or invalid input inserts nothing."
                 (goto-char (point-max)))
               (unless (bolp) (insert "\n"))
               (insert body)
-              (unless (bolp) (insert "\n")))))))))
+              (unless (bolp) (insert "\n"))
+              ;; Keep a writable line before the next date, not on metadata.
+              (unless (eobp)
+                (backward-char 1)
+                (unless (bolp) (insert "\n"))))))))))
 
 (defun gnosis-journal--role-position (role &optional heading-p)
   "Return (POSITION . FALLBACK) for ROLE in this complete dated restriction.
@@ -1510,7 +1515,8 @@ Plain checkboxes without ID links are journal prose."
 
 (defun gnosis-journal-db-sync (&optional force)
   "Sync journal entries in database.
-When FORCE, update all files.  Otherwise, only update changed files.
+Normally index changed files from disk, leaving visiting buffers untouched.
+When FORCE, rebuild all files using visiting contents when available.
 Only rebuild indexes; do not complete journal tasks."
   (gnosis-journal--file)
   (let* ((all-files (gnosis-journal--source-files))
@@ -1528,7 +1534,10 @@ Only rebuild indexes; do not complete journal tasks."
         (cl-loop for file in files
                  for i from 0
                  do (progn
-                      (gnosis-nodes-update-file file t)
+                      ;; Preserve live-buffer recovery on explicit rebuilds.
+                      (if force
+                          (gnosis-nodes-update-file file t)
+                        (gnosis-nodes--update-file file t))
                       (progress-reporter-update progress i)))
         (progress-reporter-done progress)))))
 

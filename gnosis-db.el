@@ -28,28 +28,17 @@
 
 (require 'cl-lib)
 (require 'subr-x)
-(require 'vc-git)
 (require 'gnosis-sqlite)
 (require 'gnosis-logical-day)
 (require 'gnosis-fsrs)
+
+(declare-function gnosis-vc--auto-commit "gnosis-vc"
+                  (message &optional existing-only no-push))
 
 (defcustom gnosis-dir (locate-user-emacs-file "gnosis")
   "Gnosis directory."
   :type 'directory
   :group 'gnosis)
-
-(defmacro gnosis-db--migrate-step (description &rest body)
-  "Run BODY; on error, log a debug warning with DESCRIPTION.
-Used in idempotent migration steps where errors indicate
-the operation was already applied."
-  (declare (indent 1) (debug t))
-  `(condition-case err
-       (progn ,@body)
-     (error
-      (display-warning 'gnosis
-		       (format "Migration: %s: %s"
-			       ,description (error-message-string err))
-		       :debug))))
 
 ;; Directory creation deferred to gnosis--ensure-db
 
@@ -60,13 +49,13 @@ Initialized lazily by `gnosis--ensure-db' on first use.")
 (defvar gnosis-testing nil
   "Change this to non-nil when running manual tests.")
 
-(defconst gnosis-db-version 10
+(defconst gnosis-db-version 11
   "Gnosis database version.")
 
 (defvar gnosis--id-cache nil
-  "Hash table of existing thema IDs, bound during batch import.
-When non-nil, `gnosis-generate-id' and `gnosis-update-thema' use this
-for O(1) lookups instead of querying the database per thema.")
+  "Hash table of existing and reserved thema IDs during batch import.
+When non-nil, `gnosis-generate-id' checks and reserves IDs here before
+asynchronous insertion.  Reservations do not establish stored content.")
 
 ;;; Connection
 
@@ -75,7 +64,7 @@ for O(1) lookups instead of querying the database per thema.")
 Create DIRECTORY if needed.  Close the candidate on any nonlocal exit."
   (let ((gnosis-dir (expand-file-name directory)))
     (unless (file-directory-p gnosis-dir)
-      (make-directory gnosis-dir))
+      (make-directory gnosis-dir t))
     (let ((candidate (gnosis-sqlite-open
                       (expand-file-name "gnosis.db" gnosis-dir)))
           ready)
@@ -248,7 +237,8 @@ Uses `gnosis--id-cache' for O(1) collision checking when bound."
        (hypothesis text :not-null)
        (answer text :not-null)
        (source-guid text)
-       (accepted-aliases text)]))
+       (accepted-aliases text)
+       (rubric text)]))
     (scheduler-config
      ([(id integer :primary-key :not-null)
        (algorithm text :not-null)
@@ -566,9 +556,8 @@ Used for fresh databases only."
         ON review_events(review_day)"))
   ;; source_guid index: created by v8 migration for existing DBs,
   ;; or here for fresh DBs where the column already exists
-  (gnosis-db--migrate-step "create source_guid index"
-			   (gnosis-sqlite-execute db
-						  "CREATE INDEX IF NOT EXISTS idx_themata_source_guid ON themata(source_guid)")))
+  (gnosis-sqlite-execute db
+                         "CREATE INDEX IF NOT EXISTS idx_themata_source_guid ON themata(source_guid)"))
 
 (defun gnosis--db-has-tables-p ()
   "Return non-nil if the database has user tables."
@@ -688,33 +677,38 @@ Used for fresh databases only."
       (gnosis-db--create-encounter-guards db)
       (gnosis--db-set-version 10))))
 
+(defun gnosis-db--migrate-v11 ()
+  "Upgrade validated released schema 10 with independent nullable rubric storage."
+  (unless (= 10 (gnosis--db-version)) (error "Expected released schema 10"))
+  (let ((db (gnosis--ensure-db)))
+    (gnosis-db--check-schema db 10)
+    (gnosis-sqlite-with-transaction db
+      (gnosis-sqlite-execute db "ALTER TABLE themata ADD COLUMN rubric TEXT")
+      (gnosis--db-set-version 11))))
+
 (defun gnosis--db-run-migrations (current-version &optional no-commit)
   "Upgrade released CURRENT-VERSION to `gnosis-db-version'.
 Commit afterwards unless NO-COMMIT defers that until outer validation."
   (gnosis-sqlite-with-transaction (gnosis--ensure-db)
     (pcase current-version
-      (8 (gnosis-db--migrate-v9) (gnosis-db--migrate-v10))
-      (9 (gnosis-db--migrate-v10))
-      (10 nil)
+      (8 (gnosis-db--migrate-v9) (gnosis-db--migrate-v10) (gnosis-db--migrate-v11))
+      (9 (gnosis-db--migrate-v10) (gnosis-db--migrate-v11))
+      (10 (gnosis-db--migrate-v11))
+      (11 nil)
       (_ (error "Unsupported Gnosis migration source %s" current-version))))
   (when (and (not no-commit) (< current-version gnosis-db-version))
     (gnosis--commit-migration current-version gnosis-db-version)))
 
 (defun gnosis--commit-migration (from to)
-  "Commit database after migrating from version FROM to TO.
-Uses synchronous git operations because migration must complete
-before database initialization continues."
-  (let ((default-directory gnosis-dir))
-    (unless gnosis-testing
-      (when (file-exists-p (expand-file-name ".git" gnosis-dir))
-        (call-process (executable-find "git") nil nil nil "add" "gnosis.db")
-        (call-process (executable-find "git") nil nil nil
-                      "commit" "-m"
-                      (format "Migrate database v%d -> v%d" from to))))))
+  "Optionally commit the completed migration from version FROM to TO.
+Use an existing repository without pushing.  Git runs asynchronously;
+its absence or failure does not invalidate the database upgrade."
+  (require 'gnosis-vc)
+  (gnosis-vc--auto-commit (format "Migrate database v%d -> v%d" from to) t t))
 
 (defconst gnosis-db-min-version 8
   "Oldest supported schema: released Gnosis 0.10.6.
-Released schema 8 upgrades through released 0.11.0 schema 9 to schema 10.
+Released schema 8 upgrades through schemas 9 and 10 to schema 11.
 Private development schemas require a separate, verified conversion.")
 
 (defconst gnosis-db--legacy-schemata
@@ -752,7 +746,7 @@ Private development schemas require a separate, verified conversion.")
                                      journal node-tag node-links)))
                 gnosis-db--schemata)))
     (9 (assq-delete-all 'practice-encounters (copy-sequence gnosis-db--schemata)))
-    (10 gnosis-db--schemata)
+    ((or 10 11) gnosis-db--schemata)
     (_ (error "Unsupported Gnosis schema %s" version))))
 
 (defun gnosis-db--compatible-columns-p (table schema actual &optional version)
@@ -760,11 +754,15 @@ Private development schemas require a separate, verified conversion.")
 Keep column order: positional readers and writers rely on it.  Only themata's
 observed nullable archive field, the equivalent composite tag key, and the
 historical text-affinity link source may differ from fresh storage.
-VERSION defaults to the current schema; older schemas do not yet have aliases."
+VERSION defaults to the current schema.  Schemas before 9 lack aliases;
+schemas before 11 lack rubric."
   (let* ((version (or version gnosis-db-version))
          (columns (append (car schema) nil))
-         (columns (if (and (eq table 'themata) (< version 9))
-                      (seq-remove (lambda (column) (eq (car column) 'accepted-aliases)) columns)
+         (columns (if (eq table 'themata)
+                      (seq-remove (lambda (column)
+                                    (or (and (< version 9) (eq (car column) 'accepted-aliases))
+                                        (and (< version 11) (eq (car column) 'rubric))))
+                                  columns)
                     columns))
          (expected
          (mapcar (lambda (column)
@@ -776,11 +774,10 @@ VERSION defaults to the current schema; older schemas do not yet have aliases."
     (or (equal actual expected)
         (pcase table
           ('themata
-           (or (equal actual (append expected '(("archived_at_us" "INTEGER" 0 nil 0))))
-               (and (>= version 9)
-                    (equal actual (append (butlast expected)
-                                          '(("archived_at_us" "INTEGER" 0 nil 0))
-                                          (last expected))))))
+           (let ((archive '("archived_at_us" "INTEGER" 0 nil 0)))
+             (and (= (length actual) (1+ (length expected)))
+                  (member archive (nthcdr 6 actual))
+                  (equal expected (remove archive actual)))))
           ('thema-tag
            (equal actual '(("thema_id" "INTEGER" 1 nil 1)
                            ("tag" "TEXT" 1 nil 2))))
@@ -844,14 +841,28 @@ all application values.  Reject damaged required objects before any writes."
             (error "Invalid Gnosis schema %d: missing or changed guard %s"
                    version name))))))
   ;; Row integrity alone cannot detect a missing deletion cascade.
-  (when (and (>= version 9)
-             (not (equal '((0 0 "themata" "thema_id" "id" "NO ACTION" "CASCADE" "NONE"))
-                         (sqlite-select db "PRAGMA foreign_key_list(practice_events)"))))
-    (error "Invalid practice event ownership constraint"))
-  (when (and (>= version 10)
-             (not (equal '((0 0 "practice_events" "event_id" "event_id" "NO ACTION" "CASCADE" "NONE"))
-                         (sqlite-select db "PRAGMA foreign_key_list(practice_encounters)"))))
-    (error "Invalid practice encounter ownership constraint"))
+  (when (>= version 9)
+    (pcase-dolist
+        (`(,table ,parent ,column ,parent-column)
+         (append '(("scheduler_baseline" "themata" "thema_id" "id")
+                   ("scheduler_state" "scheduler_baseline" "thema_id" "thema_id")
+                   ("review_events" "scheduler_baseline" "thema_id" "thema_id")
+                   ("review_voids" "review_events" "event_id" "event_id")
+                   ("practice_events" "themata" "thema_id" "id")
+                   ("practice_voids" "practice_events" "event_id" "event_id"))
+                 (when (>= version 10)
+                   '(("practice_encounters" "practice_events" "event_id" "event_id")))))
+      (let ((expected
+             (cons (list 0 parent column parent-column "NO ACTION" "CASCADE" "NONE")
+                   (when (member table '("scheduler_state" "review_events"))
+                     '((0 "scheduler_config" "config_id" "id" "NO ACTION" "NO ACTION" "NONE")))))
+            ;; Constraint numbers and declaration order are not ownership.
+            ;; Keep sequence numbers so composite keys cannot pass as singles.
+            (actual (mapcar #'cdr (sqlite-select
+                                  db (format "PRAGMA foreign_key_list(%s)" table)))))
+        (unless (and (= (length expected) (length actual))
+                     (seq-every-p (lambda (key) (member key actual)) expected))
+          (error "Invalid %s ownership constraint" table)))))
   (when (and (>= version 9)
              (not (equal '((1)) (sqlite-select db "SELECT id FROM scheduler_config WHERE id = 1"))))
     (error "Gnosis database is missing its baseline scheduler configuration"))

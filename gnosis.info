@@ -46,7 +46,7 @@ Installation and Setup
 * Installing from GNU ELPA::
 * Basic Configuration::
 * Key Directories::
-* Upgrading to 0.11.0: Upgrading to 0110.
+* Database Upgrade Compatibility::
 * Version Control::
 * Completing Read Integration::
 * Full Example Configuration::
@@ -142,6 +142,7 @@ Themata (Spaced Repetition Cards)
 Thema Types
 
 * Basic::
+* Agent-eval::
 * Double::
 * MCQ (Multiple Choice Question)::
 * Cloze::
@@ -151,6 +152,7 @@ Thema Types
 Accepted aliases
 
 * Images, regions and occlusion: Images regions and occlusion.
+* Lecture illustrations in Parathema::
 * Models Find and Name::
 
 Review System
@@ -176,6 +178,8 @@ Type-Specific Review Behaviour
 
 Topic and Subtree Study
 
+* Scheduled Review After Practice::
+* Practice Completion Notifications::
 * Legacy Review Ahead::
 
 Logical Review Day
@@ -193,7 +197,7 @@ Dashboard
 
 Export and Import
 
-* Database Version 9::
+* Database Upgrades and Rollback::
 * Full Backups Versus Content Exports::
 * Exporting::
 * Importing::
@@ -311,6 +315,8 @@ between reviews based on performance.
 
    • *Basic*: A direct question with typed matching or
      reveal-and-self-grade.
+   • *Agent-eval*: A free-text explanation assessed against a reference
+     and rubric.
    • *Double*: Two prompts, each with its own answer, presented in
      sequence.
    • *MCQ* (Multiple Choice Question): The user selects one correct
@@ -369,9 +375,9 @@ Themata, indexes, schedules and study history live in the SQLite
 database at ‘GNOSIS-DIR/gnosis.db’.  Org files own note contents, and
 managed images/models live in ‘assets/’ beside the database.  External
 media remains at its referenced paths.  A new database is created on
-first use; back up existing data before an upgrade (see Database Version
-9).  Gnosis requires Emacs 29.1 or later with built-in SQLite support,
-the ‘compat’ library, and ‘keymap-popup’.
+first use; back up existing data before an upgrade (see *note Database
+Upgrades and Rollback::).  Gnosis requires Emacs 29.1 or later with
+built-in SQLite support, the ‘compat’ library, and ‘keymap-popup’.
 
 
 File: gnosis.info,  Node: Installation and Setup,  Next: Nodes (1),  Prev: Introduction,  Up: Top
@@ -385,7 +391,7 @@ File: gnosis.info,  Node: Installation and Setup,  Next: Nodes (1),  Prev: Intro
 * Installing from GNU ELPA::
 * Basic Configuration::
 * Key Directories::
-* Upgrading to 0.11.0: Upgrading to 0110.
+* Database Upgrade Compatibility::
 * Version Control::
 * Completing Read Integration::
 * Full Example Configuration::
@@ -447,7 +453,7 @@ use.
        (gnosis-journal-dir "~/Notes/journal/"))
 
 
-File: gnosis.info,  Node: Key Directories,  Next: Upgrading to 0110,  Prev: Basic Configuration,  Up: Installation and Setup
+File: gnosis.info,  Node: Key Directories,  Next: Database Upgrade Compatibility,  Prev: Basic Configuration,  Up: Installation and Setup
 
 2.4 Key Directories
 ===================
@@ -505,20 +511,21 @@ separately from regular nodes but use the same underlying mechanism.
      (setopt gnosis-journal-dir (expand-file-name "journal/" gnosis-nodes-dir))
 
 
-File: gnosis.info,  Node: Upgrading to 0110,  Next: Version Control,  Prev: Key Directories,  Up: Installation and Setup
+File: gnosis.info,  Node: Database Upgrade Compatibility,  Next: Version Control,  Prev: Key Directories,  Up: Installation and Setup
 
-2.5 Upgrading to 0.11.0
-=======================
+2.5 Database Upgrade Compatibility
+==================================
 
-The supported upgrade is released Gnosis 0.10.6 (database version 8)
-directly to version 9.  Separate org-gnosis databases and older Gnosis
+Released Gnosis 0.12.0 databases upgrade from schema 10 to 11; 0.11.0
+and 0.10.6 databases upgrade through the preserved 9-to-10 and 8-to-9
+steps respectively.  Separate org-gnosis databases and older Gnosis
 schemas are not automatically imported.  Preserve their data and use
 matching older source or a separately verified conversion.  Follow the
-pre-first-open backup procedure in Database Version 9 before opening an
-existing database with 0.11.0.
+pre-first-open backup procedure in *note Database Upgrades and
+Rollback:: before opening an existing database with 0.12.0.
 
 
-File: gnosis.info,  Node: Version Control,  Next: Completing Read Integration,  Prev: Upgrading to 0110,  Up: Installation and Setup
+File: gnosis.info,  Node: Version Control,  Next: Completing Read Integration,  Prev: Database Upgrade Compatibility,  Up: Installation and Setup
 
 2.6 Version Control
 ===================
@@ -1268,7 +1275,11 @@ Every thema shares a common set of fields:
      role differs by type: for MCQ it holds the list of answer choices,
      for basic it holds an optional hint, and for cloze and mc-cloze it
      holds hints corresponding to each gap.
-   • *answer*: The correct answer or list of cloze gaps.
+   • *answer*: The correct answer or list of cloze gaps.  For
+     agent-eval, one multiline reference answer.
+   • *rubric*: Agent-eval grading guidance, separate from the reference
+     answer and teaching text.  State essential points and consequential
+     errors.
    • *parathema* (_παράθεμα_, side-text): supplementary text shown after
      answering, used to add context or a longer explanation.
    • *tags*: A list of strings for organising, filtering, and selecting
@@ -1282,11 +1293,12 @@ File: gnosis.info,  Node: Thema Types,  Next: Accepted aliases,  Prev: Fields of
 5.2 Thema Types
 ===============
 
-Gnosis provides five thema types:
+Gnosis provides the following thema types:
 
 * Menu:
 
 * Basic::
+* Agent-eval::
 * Double::
 * MCQ (Multiple Choice Question)::
 * Cloze::
@@ -1294,7 +1306,7 @@ Gnosis provides five thema types:
 * Accepted aliases: Accepted aliases (1).
 
 
-File: gnosis.info,  Node: Basic,  Next: Double,  Up: Thema Types
+File: gnosis.info,  Node: Basic,  Next: Agent-eval,  Up: Thema Types
 
 5.2.1 Basic
 -----------
@@ -1306,9 +1318,73 @@ case-insensitive and allows for a small Levenshtein distance, controlled
 by ‘gnosis-string-difference’.
 
 
-File: gnosis.info,  Node: Double,  Next: MCQ (Multiple Choice Question),  Prev: Basic,  Up: Thema Types
+File: gnosis.info,  Node: Agent-eval,  Next: Double,  Prev: Basic,  Up: Thema Types
 
-5.2.2 Double
+5.2.2 Agent-eval
+----------------
+
+Choose ‘Agent-eval’ in ‘gnosis-add-thema’ for questions that need an
+explanation rather than a typed spelling.  Keimenon is the question.
+Answer is one nonempty reference answer, even when it spans paragraphs
+or bullet lists.  Rubric is a separate required, nonempty free-text
+field: explain which points are essential and which omissions or
+consequential errors make a response incorrect.  Hypothesis holds
+optional hints; Parathema holds teaching material and descriptive source
+links shown after answering.  Accepted aliases are not supported.
+
+   For example, the native draft can contain:
+
+     ** Keimenon
+     Why does removing the cause reverse the effect in this example?
+     ** Hypothesis
+     - Explain the mechanism, not just the association.
+     ** Answer
+     The cause activates the intermediate mechanism.
+     Removing it stops that mechanism, so the effect subsides.
+     ** Rubric
+     Essential: identify the intermediate mechanism and its direction.
+     Consequential error: claiming the effect causes the original trigger.
+     ** Parathema
+     Review the causal chain and compare it with an association alone.
+     - [[id:source-node-id][Source explanation]]
+
+   Save with ‘C-c C-c’; reopen normally to edit the reference and
+rubric.  These bodies are literal multiline text, not the list of
+independent accepted answers used by other types.  Hyphens,
+checkbox-looking text and spaces are preserved.  Lines starting with
+stars or ‘#+’ are comma-escaped in the draft using Org's literal-code
+convention and unescaped on save.  The editor places two separator
+newlines after each body; they are not part of its value.  Removing or
+blanking Rubric prevents an agent-eval save; it never reuses a hidden
+rubric from an older draft.
+
+   The default ‘gnosis-agent-eval-function’ is
+‘gnosis-agent-eval-hermes’.  Install ‘emacs-hermes’ with
+‘hermes-request’ support to use it.  Gnosis loads that optional
+integration only when evaluation is requested; ordinary authoring and
+other thema types do not require Hermes.  Customize
+‘gnosis-agent-eval-hermes-profile’ to select the evaluator profile
+(default ‘"default"’).  The profile owns its model, credentials and
+instructions.  ‘gnosis-agent-eval-hermes-backend-url’ optionally selects
+a dedicated backend; its default nil uses Hermes's configured transport.
+This selection does not change your default backend or current chat.
+The chosen backend must provide the selected profile.  Requests contain
+the question, reference answer, rubric and your response; choose a
+profile/provider suitable for that content.
+
+   During review the question and hints stay in the review buffer.
+Write your response in the separate native text-mode response buffer,
+then press ‘C-c C-c’ to submit it for asynchronous evaluation.  Feedback
+appears inline after the response.  Press ‘C-c C-c’ again to continue to
+the ordinary review actions.  ‘C-c C-k’ cancels a pending evaluation
+while preserving your response for retry; ‘C-g’ aborts without recording
+a grade.  Evaluator feedback is not a substitute for checking the source
+or deciding whether a rubric tests what you intend.
+
+
+File: gnosis.info,  Node: Double,  Next: MCQ (Multiple Choice Question),  Prev: Agent-eval,  Up: Thema Types
+
+5.2.3 Double
 ------------
 
 A convenience type that creates *two* basic themata from a single
@@ -1319,7 +1395,7 @@ scheduled separately.
 
 File: gnosis.info,  Node: MCQ (Multiple Choice Question),  Next: Cloze,  Prev: Double,  Up: Thema Types
 
-5.2.3 MCQ (Multiple Choice Question)
+5.2.4 MCQ (Multiple Choice Question)
 ------------------------------------
 
 The keimenon is the question.  The hypothesis holds a list of answer
@@ -1330,7 +1406,7 @@ from the completion interface rather than typing freely.
 
 File: gnosis.info,  Node: Cloze,  Next: MC-cloze (Multiple Choice Cloze),  Prev: MCQ (Multiple Choice Question),  Up: Thema Types
 
-5.2.4 Cloze
+5.2.5 Cloze
 -----------
 
 A fill-in-the-blank type.  The keimenon is a sentence with one or more
@@ -1347,7 +1423,7 @@ whole thema.  Hints can be embedded after a double colon:
 
 File: gnosis.info,  Node: MC-cloze (Multiple Choice Cloze),  Next: Accepted aliases (1),  Prev: Cloze,  Up: Thema Types
 
-5.2.5 MC-cloze (Multiple Choice Cloze)
+5.2.6 MC-cloze (Multiple Choice Cloze)
 --------------------------------------
 
 Like cloze, but the user selects the correct word from a list of
@@ -1357,7 +1433,7 @@ supported per thema.  The answer must appear verbatim in the sentence.
 
 File: gnosis.info,  Node: Accepted aliases (1),  Prev: MC-cloze (Multiple Choice Cloze),  Up: Thema Types
 
-5.2.6 Accepted aliases
+5.2.7 Accepted aliases
 ----------------------
 
 Basic typed answers, Image-occlusion and Model-name can accept
@@ -1384,9 +1460,9 @@ folding and configured ‘gnosis-string-difference’ tolerance, including
 the existing short-string exact-match rule.  Reveal text and
 input-method selection still use the canonical Answer.  Basic
 self-grading does not perform typed matching.  Aliases are not supported
-on MCQ, cloze, MC-cloze, Image-region or Model Find.  Double creates two
-basic themata; supplied aliases belong only to the forward question, not
-its reverse.
+on Agent-eval, MCQ, cloze, MC-cloze, Image-region or Model Find.  Double
+creates two basic themata; supplied aliases belong only to the forward
+question, not its reverse.
 
    Save with ‘C-c C-c’ and reopen through the normal edit command to
 inspect the retained field.  Removing or emptying the Accepted aliases
@@ -1400,10 +1476,11 @@ the answer already given.
 * Menu:
 
 * Images, regions and occlusion: Images regions and occlusion.
+* Lecture illustrations in Parathema::
 * Models Find and Name::
 
 
-File: gnosis.info,  Node: Images regions and occlusion,  Next: Models Find and Name,  Up: Accepted aliases
+File: gnosis.info,  Node: Images regions and occlusion,  Next: Lecture illustrations in Parathema,  Up: Accepted aliases
 
 5.3.1 Images, regions and occlusion
 -----------------------------------
@@ -1484,15 +1561,61 @@ explanations.
 
    Gnosis copies images into ‘assets/<revision>/’ beside the connected
 database; the portable Org link uses the ‘gnosis-image:’ scheme.  Keep
-that directory with database backups.  Content-only SQLite export/import
-refuses managed image content because it does not bundle the assets.
-TIFF and DICOM are not supported; no converter, medical atlas or
-external image service is required.
+that directory with database backups.  SQLite content export/import
+bundles ordinary inline managed images.  Region and occlusion thema
+types remain unsupported by content exchange; use database-plus-assets
+backups for those.  TIFF and DICOM are not supported.  Ordinary raster
+attachments need no external converter.
 
 
-File: gnosis.info,  Node: Models Find and Name,  Prev: Images regions and occlusion,  Up: Accepted aliases
+File: gnosis.info,  Node: Lecture illustrations in Parathema,  Next: Models Find and Name,  Prev: Images regions and occlusion,  Up: Accepted aliases
 
-5.3.2 Models: Find and Name
+5.3.2 Lecture illustrations in Parathema
+----------------------------------------
+
+Use ‘C-c C-l’ (‘gnosis-lecture-attach’) in a single thema draft to
+attach an existing PNG/JPEG or one physical page of a local PDF.  The
+command always appends to *Parathema*, regardless of point.  PDF page
+numbers are 1-based physical pages, not printed slide numbers or PDF
+page labels.
+
+   PDF extraction requires Poppler's ‘pdftoppm’.  It runs
+asynchronously, fitting the page within 1800 pixels, with a 60-second
+deadline.  Cancel with ‘C-c C-x’ (‘gnosis-lecture-cancel’).  Changing
+the draft while rendering refuses the late insertion; save or
+cancellation never inserts into a successor draft.  Missing files,
+unsupported rasters, invalid pages and conversion errors leave the draft
+unchanged.  Sources must be local and at most 100 MiB; managed rasters
+retain the ordinary image limits.
+
+   Save with ‘C-c C-c’, then review normally.  The illustration is
+hidden until the answer, in both scheduled review and practice, and fits
+the review window.  Ordinary question images keep their existing
+behavior.  Unavailable managed pixels stop the encounter rather than
+recording an incorrect answer.
+
+   The attachment includes an actionable ‘gnosis-lecture:’ citation to
+the original path and physical page.  During review, choose *View
+source* from the normal actions, then select the lecture.  Return with
+‘C-c C-c’ to the same pending answer.  PDFs open through native DocView
+or configured pdf-tools; ‘pdfinfo’ (also from Poppler) verifies the
+physical page before navigation.  The citation is a local external
+reference, not an archived lecture: moving or replacing the original can
+make it unavailable or change its contents.  Keep originals separately.
+Missing originals do not prevent review of the managed extracted image.
+
+   SQLite content export includes the managed illustration, its
+immutable manifest and citation.  Import validates the bundled bytes
+before applying content.  It never copies the full PDF, follows external
+file links, or fetches network sources.  Export files therefore remain
+usable after moving to another machine even when the original PDF is
+absent; source navigation still requires that external original at the
+retained path.
+
+
+File: gnosis.info,  Node: Models Find and Name,  Prev: Lecture illustrations in Parathema,  Up: Accepted aliases
+
+5.3.3 Models: Find and Name
 ---------------------------
 
 Model Find asks you to pick a whole object, surface point or surface
@@ -2243,12 +2366,107 @@ heading.
 
 * Menu:
 
+* Scheduled Review After Practice::
+* Practice Completion Notifications::
 * Legacy Review Ahead::
 
 
-File: gnosis.info,  Node: Legacy Review Ahead,  Up: Topic and Subtree Study
+File: gnosis.info,  Node: Scheduled Review After Practice,  Next: Practice Completion Notifications,  Up: Topic and Subtree Study
 
-6.8.1 Legacy Review Ahead
+6.8.1 Scheduled Review After Practice
+-------------------------------------
+
+A completed, nonempty practice summary offers a *Scheduled review*
+button and the ‘s’ binding (‘gnosis-review-summary-scheduled’).  This is
+an explicit new session, not conversion of practice results: only newly
+accepted scheduled answers affect FSRS.  Nothing starts automatically.
+
+   The command resolves the original selected IDs against current
+questions, so repairs made after practice are used.  Its confirmation
+shows counts of deleted, suspended, otherwise ineligible and not-yet-due
+exclusions.  Selection is due-only, including eligible new cards.  Like
+explicit topic review, it does not apply ‘gnosis-new-themata-limit’;
+unrelated due cards cannot displace this selection.  It never unsuspends
+cards.
+
+   Declining, ‘C-g’, an empty selection or setup failure leaves the
+completed checkpoint intact.  Starting review preserves the practice
+history and encounters and installs a separate scheduled checkpoint.
+The old summary then becomes stale: activating it again cannot launch a
+duplicate batch.  A summary from another database connection or a
+changed checkpoint is also refused.  Current eligibility is checked
+again after confirmation and setup; if it changes, request the action
+again to inspect the new counts.
+
+
+File: gnosis.info,  Node: Practice Completion Notifications,  Next: Legacy Review Ahead,  Prev: Scheduled Review After Practice,  Up: Topic and Subtree Study
+
+6.8.2 Practice Completion Notifications
+---------------------------------------
+
+‘gnosis-practice-completed-hook’ is an optional, agent-neutral hook.
+Each function receives one fresh plist after a nonempty native practice
+batch with accepted evidence completes.  The evidence and final
+checkpoint have committed, native input has unwound, and the summary has
+been presented.  Native resume and ‘gnosis-agent-resume’ use the same
+completion path.  Cancelled, interrupted, still-unfinished, empty and
+wholly unattempted batches do not notify.  Completion means the finite
+queue ended, not mastery or attainment of every practice target.
+
+   The API v1 event has these fields; it contains no answers or question
+text:
+
+   • ‘:api-version’: ‘1’.
+   • ‘:mode’: ‘"practice"’.
+   • ‘:session-id’: the retained batch identity.
+   • ‘:database’: the originating main SQLite filename, not
+     ‘gnosis-dir’.
+   • ‘:connection’: the originating open SQLite connection (an Emacs
+     object, not JSON data).  A consumer must check/use this origin
+     rather than assume that the current connection still owns the
+     notification.
+
+   Subscribers should be quick and read-only.  For example, an
+integration can explicitly query detailed results, which can include
+answers:
+
+     (require 'gnosis-agent)
+     (defun my-practice-completed (event)
+       (let* ((gnosis-db (plist-get event :connection))
+              (result (gnosis-agent-results (plist-get event :session-id))))
+         (message "Practice completed: %d accepted attempts"
+                  (plist-get (plist-get result :summary) :attempts))))
+     (add-hook 'gnosis-practice-completed-hook #'my-practice-completed)
+
+   The read-only status/results API also supports native practice
+without a frozen target policy.  For these legacy one-retry batches,
+‘:policy’ and ‘:targets’ are nil.  Per-item ‘:target’ is nil,
+‘:successes’ counts effective accepted successes, and ‘:reason’ is
+‘"completed"’, ‘"unfinished"’ or ‘"excluded"’.  Existing frozen-policy
+results retain their target semantics.
+
+   Delivery is synchronous and best-effort, not a persistent message
+queue.  An error or quit from one subscriber is reported without
+preventing other subscribers or rolling back accepted evidence.
+Reentrant callbacks have no subsequent core summary rendering, input or
+checkpoint write to redirect; this is not a sandbox for extensions.  No
+integration dependency is loaded by the hook itself.
+
+   Reopening a summary never emits another completion transition.  There
+is no automatic replay on restart: a crash between commit and
+notification can lose delivery.  Consumers can recover by querying
+retained results.  Use the pair ‘(:database :session-id)’ as the stable
+batch deduplication identity while retaining the database at that path.
+Moving or replacing a database requires the consumer to manage that
+identity explicitly; the path is not a database UUID.  Undo followed by
+completion can notify again for the same batch.  Consumers tracking
+corrections should requery its results rather than treating notification
+as immutable answer evidence.
+
+
+File: gnosis.info,  Node: Legacy Review Ahead,  Prev: Practice Completion Notifications,  Up: Topic and Subtree Study
+
+6.8.3 Legacy Review Ahead
 -------------------------
 
 ‘gnosis-review-topic’ retains its schedule-affecting semantics.  It
@@ -2526,7 +2744,7 @@ formats, especially for large collections.
 
 * Menu:
 
-* Database Version 9::
+* Database Upgrades and Rollback::
 * Full Backups Versus Content Exports::
 * Exporting::
 * Importing::
@@ -2535,59 +2753,84 @@ formats, especially for large collections.
 * Importing from Anki::
 
 
-File: gnosis.info,  Node: Database Version 9,  Next: Full Backups Versus Content Exports,  Up: Export and Import
+File: gnosis.info,  Node: Database Upgrades and Rollback,  Next: Full Backups Versus Content Exports,  Up: Export and Import
 
-9.1 Database Version 9
-======================
+9.1 Database Upgrades and Rollback
+==================================
 
-Gnosis upgrades released 0.10.6 databases (version 8) directly to
-version 9.  This is the only supported migration in 0.11.0.  Unknown or
-private development versions are refused; preserve a backup and use
-matching source or a separately verified conversion rather than changing
-the version.
+This version uses database schema 11.  On first open, it upgrades
+released 0.12.0 databases from schema 10 to 11.  Released 0.11.0 and
+0.10.6 databases upgrade from schemas 9 and 8 through the same preserved
+steps in one open; installing intermediate releases first is not
+necessary.  Unknown or private development layouts are refused; preserve
+a backup and use matching source or a separately verified conversion
+rather than changing the version number.
 
-   The migration creates the complete FSRS and study storage in one
-transaction: scheduler baselines and state, scheduled events, separate
-practice encounters, a retained study session, session snapshots by
-identity in ‘study_history’, active configuration selection and
-scheduled/practice void records.  It initially selects configuration 1.
-Known legacy due dates, repetition/lapse counts, suspension and
-aggregate activity are retained.  Legacy algorithm values do not become
-FSRS memory or invented event-level history.
+   The 8-to-9 step creates the FSRS and study storage: scheduler
+baselines and state, scheduled events, separate practice events, a
+retained study session, session snapshots by identity in
+‘study_history’, active configuration selection and scheduled/practice
+void records.  It initially selects configuration 1.  Known legacy due
+dates, repetition/lapse counts, suspension and aggregate activity are
+retained.  Legacy algorithm values do not become FSRS memory or invented
+event-level history.
 
-   Version 9 also adds nullable ‘themata.accepted_aliases’ without
-rewriting existing answers; old rows have no aliases.  Schema, data and
-version changes roll back together on error or quit.  This database
-version is separate from portable content format 3, which carries
-aliases explicitly.  Content formats 1 and 2 remain readable and supply
-no aliases.  Alias-only changes and clears appear in import preview and
-participate in drift checks.  Format 3 is still content-only: it does
-not bundle managed images or models.
+   Schema 9 also adds nullable ‘themata.accepted_aliases’ without
+rewriting existing answers; old rows have no aliases.
 
-   Before the *first database open* with 0.11.0:
+   The 9-to-10 step adds ‘practice_encounters’ and its integrity guards
+to retain accepted practice answers and context.  Existing content,
+schedules and study history are preserved; missing historical answers
+are not invented.  The 10-to-11 step adds nullable ‘themata.rubric’ for
+agent-eval themata; existing rows retain their original answers and have
+no rubric.  All upgrade steps run in one transaction: schema, data and
+version changes roll back together on error or quit.
 
-  1. Stop other Gnosis database and filesystem writers.  Keep the
-     released 0.10.6 package/source available for recovery.
-  2. Load Gnosis without opening a dashboard or starting review, and set
-     ‘gnosis-dir’ to the existing data directory.  Run ‘M-x
-     gnosis-backup-db’ and choose a new backup filename.  With no Gnosis
-     connection open, this command reads the existing database
-     independently: it does not initialize or migrate it.
-  3. Back up Org source files and all managed/external media separately.
-     A database-only backup contains their references, not their bytes.
+   Database schema versions are separate from portable content format 5,
+which carries aliases, the separate rubric and bundled inline managed
+images.  Content formats 1–4 remain readable without media: formats 1/2
+supply no aliases, and formats 1–3 supply no rubric.  Alias and rubric
+changes appear in import preview and participate in source and
+destination drift checks.  Format 5 bundles only referenced image
+manifests and raster bytes, not external originals, model resources,
+schedules or study history.  Region and occlusion thema types remain
+unsupported.  Failed or cancelled import can leave unreferenced
+immutable images, but never commits content before its images are
+available.  Sharing an Org draft alone does not bundle media.
+
+   Before the *first database open* with schema-11 code:
+
+  1. Stop other Gnosis database and filesystem writers and close
+     existing Gnosis connections.  Keep the package/source matching the
+     old database available for recovery: 0.12.0 for schema 10, 0.11.0
+     for schema 9, or 0.10.6 for schema 8.
+  2. Load the upgraded code without opening a dashboard or starting
+     review, and set ‘gnosis-dir’ to the existing data directory.  Run
+     ‘M-x gnosis-backup-db’ and choose a new backup filename.  With no
+     Gnosis connection open, this version of the command reads the
+     existing ‘gnosis.db’ independently: it does not initialize or
+     migrate it.  Do not substitute an older backup implementation
+     without checking that property.
+  3. Back up Org source files and all managed/external media separately,
+     including the ‘assets/’ directory beside the database.  A
+     database-only backup contains their references, not their bytes.
   4. Preserve those backups, then open Gnosis to perform the upgrade.
      On initialization failure, stop; do not relabel the database
      version.
 
-   For rollback, close every owner and restore the old database together
-with its matching 0.10.6 source and separately backed-up files.  Never
-open a version-9 database with old code.  A portable content export
-cannot restore schedules or session progress.  ‘gnosis-backup-data’
-requires an open connection, so it is not the pre-first-open backup
-step.
+   For rollback, close every database owner before restoring the
+pre-upgrade database, its matching release source and the separately
+backed-up Org/media files.  Use a schema-10 backup with 0.12.0, a
+schema-9 backup with 0.11.0, or a schema-8 backup with 0.10.6.  Never
+open a newer schema with source that supports only an older schema;
+there is no reverse migration.  Keep the upgraded data separately if
+needed: restoring the old backup does not retain work done since that
+backup.  A portable content export cannot restore schedules or session
+progress.  ‘gnosis-backup-data’ requires an open connection, so it is
+not the pre-first-open backup step.
 
 
-File: gnosis.info,  Node: Full Backups Versus Content Exports,  Next: Exporting,  Prev: Database Version 9,  Up: Export and Import
+File: gnosis.info,  Node: Full Backups Versus Content Exports,  Next: Exporting,  Prev: Database Upgrades and Rollback,  Up: Export and Import
 
 9.2 Full Backups Versus Content Exports
 =======================================
@@ -2889,130 +3132,134 @@ automatic commits:
 
 Tag Table:
 Node: Top229
-Node: Introduction4167
-Node: Why Gnosis5033
-Node: The Two Subsystems5990
-Node: Nodes6230
-Node: Themata6766
-Node: The Link Between Nodes and Themata8153
-Node: Greek Terminology Reference8891
-Node: Data Storage9715
-Node: Installation and Setup10325
-Node: Requirements10702
-Node: Installing from GNU ELPA11279
-Node: Basic Configuration11638
-Node: Key Directories12413
-Node: gnosis-dir12651
-Node: gnosis-nodes-dir13067
-Node: gnosis-journal-dir14161
-Node: Upgrading to 011014606
-Node: Version Control15163
-Node: Completing Read Integration15733
-Node: Full Example Configuration16314
-Node: Nodes (1)16826
-Node: What Makes an Org Heading a Node17653
-Node: Creating and Finding Nodes18312
-Node: gnosis-nodes-find18569
-Node: gnosis-nodes-find-by-tag19156
-Node: File Naming19511
-Node: gnosis-nodes-timestring19951
-Node: GPG Encryption20749
-Node: Displaying Tags in Completion21227
-Node: Templates21797
-Node: gnosis-nodes-templates22187
-Node: The {*} Heading Marker23489
-Node: Inserting a Template Manually24456
-Node: Automatic Sync24834
-Node: Manual Sync25266
-Node: Force Rebuild25837
-Node: Deleting a Node File26098
-Node: Links Between Nodes27362
-Node: Backlinks28246
-Node: Tags28607
-Node: Adding Tags29091
-Node: Journal29697
-Node: Creating Entries30306
-Node: gnosis-journal30495
-Node: gnosis-journal-find30714
-Node: File vs Single-File Mode31180
-Node: Single Journal File (Default)31451
-Node: GPG Encryption (1)32644
-Node: Templates (1)33027
-Node: gnosis-journal-templates33329
-Node: ``TODO'' Integration34061
-Node: gnosis-journal-todo-files34546
-Node: gnosis-journal-todo-keywords34885
-Node: Bullet Point Character35533
-Node: How Task Collection Works36004
-Node: Completing source tasks36589
-Node: Dated navigation37087
-Node: Command map37681
-Node: Inserting Journal Links38341
-Node: Full Journal Configuration Example38741
-Node: Themata (Spaced Repetition Cards)39613
-Node: Fields of a Thema40416
-Node: Thema Types41507
-Node: Basic41862
-Node: Double42273
-Node: MCQ (Multiple Choice Question)42640
-Node: Cloze43090
-Node: MC-cloze (Multiple Choice Cloze)43756
-Node: Accepted aliases (1)44168
-Node: Accepted aliases44552
-Node: Images regions and occlusion46041
-Node: Models Find and Name51143
-Ref: Optional canvas backend59411
-Ref: Reviewing or practising a model62109
-Ref: Exchange and backup limits64460
-Node: Creating Themata65224
-Node: Editing Themata67437
-Node: Tags on Themata68761
-Node: The Link Between Themata and Nodes69256
-Node: Suspending Themata70084
-Node: Review System70458
-Node: Starting a Review Session71200
-Node: Finite Batches and Summaries72632
-Node: Tag Filtering74010
-Node: The Review Flow74477
-Node: Resume Continue Discard and Undo77467
-Node: Scheduling and Retention80530
-Node: Type-Specific Review Behaviour83842
-Node: Basic (1)84129
-Node: MCQ85643
-Node: Cloze (1)85942
-Node: MC-cloze86349
-Node: Topic and Subtree Study86602
-Node: Legacy Review Ahead88797
-Node: Activity Logging89514
-Node: Monkeytype89964
-Node: Sample Configuration90720
-Node: Logical Review Day91078
-Node: Day Boundary91246
-Node: Dashboard91981
-Node: Opening the Dashboard92451
-Node: Study Activity and History92925
-Node: The Themata View95371
-Node: The Nodes View95942
-Node: Topic Study and Repair Views97032
-Node: The Tags View99468
-Node: Export and Import99811
-Node: Database Version 9100327
-Node: Full Backups Versus Content Exports103007
-Node: Exporting107327
-Node: Tag Filter Notation107914
-Node: Programmatic Use108287
-Node: Importing108519
-Node: The Export Format109260
-Node: Editing Themata (Org Format)109651
-Node: Importing from Anki110124
-Node: What Gets Imported110999
-Node: What Does Not Transfer111446
-Node: Requirements (1)111783
-Node: Link Health and Maintenance112174
-Node: Checking Link Health112738
-Node: Full Synchronisation112983
-Node: Syncing the Node Database113332
-Node: Version Control (1)113766
+Node: Introduction4300
+Node: Why Gnosis5166
+Node: The Two Subsystems6123
+Node: Nodes6363
+Node: Themata6899
+Node: The Link Between Nodes and Themata8377
+Node: Greek Terminology Reference9115
+Node: Data Storage9939
+Node: Installation and Setup10569
+Node: Requirements10939
+Node: Installing from GNU ELPA11516
+Node: Basic Configuration11875
+Node: Key Directories12650
+Node: gnosis-dir12901
+Node: gnosis-nodes-dir13317
+Node: gnosis-journal-dir14411
+Node: Database Upgrade Compatibility14856
+Node: Version Control15536
+Node: Completing Read Integration16119
+Node: Full Example Configuration16700
+Node: Nodes (1)17212
+Node: What Makes an Org Heading a Node18039
+Node: Creating and Finding Nodes18698
+Node: gnosis-nodes-find18955
+Node: gnosis-nodes-find-by-tag19542
+Node: File Naming19897
+Node: gnosis-nodes-timestring20337
+Node: GPG Encryption21135
+Node: Displaying Tags in Completion21613
+Node: Templates22183
+Node: gnosis-nodes-templates22573
+Node: The {*} Heading Marker23875
+Node: Inserting a Template Manually24842
+Node: Automatic Sync25220
+Node: Manual Sync25652
+Node: Force Rebuild26223
+Node: Deleting a Node File26484
+Node: Links Between Nodes27748
+Node: Backlinks28632
+Node: Tags28993
+Node: Adding Tags29477
+Node: Journal30083
+Node: Creating Entries30692
+Node: gnosis-journal30881
+Node: gnosis-journal-find31100
+Node: File vs Single-File Mode31566
+Node: Single Journal File (Default)31837
+Node: GPG Encryption (1)33030
+Node: Templates (1)33413
+Node: gnosis-journal-templates33715
+Node: ``TODO'' Integration34447
+Node: gnosis-journal-todo-files34932
+Node: gnosis-journal-todo-keywords35271
+Node: Bullet Point Character35919
+Node: How Task Collection Works36390
+Node: Completing source tasks36975
+Node: Dated navigation37473
+Node: Command map38067
+Node: Inserting Journal Links38727
+Node: Full Journal Configuration Example39127
+Node: Themata (Spaced Repetition Cards)39999
+Node: Fields of a Thema40802
+Node: Thema Types42107
+Node: Basic42486
+Node: Agent-eval42901
+Node: Double46213
+Node: MCQ (Multiple Choice Question)46585
+Node: Cloze47035
+Node: MC-cloze (Multiple Choice Cloze)47701
+Node: Accepted aliases (1)48113
+Node: Accepted aliases48497
+Node: Images regions and occlusion50037
+Node: Lecture illustrations in Parathema55228
+Node: Models Find and Name57668
+Ref: Optional canvas backend65942
+Ref: Reviewing or practising a model68640
+Ref: Exchange and backup limits70991
+Node: Creating Themata71755
+Node: Editing Themata73968
+Node: Tags on Themata75292
+Node: The Link Between Themata and Nodes75787
+Node: Suspending Themata76615
+Node: Review System76989
+Node: Starting a Review Session77731
+Node: Finite Batches and Summaries79163
+Node: Tag Filtering80541
+Node: The Review Flow81008
+Node: Resume Continue Discard and Undo83998
+Node: Scheduling and Retention87061
+Node: Type-Specific Review Behaviour90373
+Node: Basic (1)90660
+Node: MCQ92174
+Node: Cloze (1)92473
+Node: MC-cloze92880
+Node: Topic and Subtree Study93133
+Node: Scheduled Review After Practice95402
+Node: Practice Completion Notifications96859
+Node: Legacy Review Ahead100208
+Node: Activity Logging100967
+Node: Monkeytype101417
+Node: Sample Configuration102173
+Node: Logical Review Day102531
+Node: Day Boundary102699
+Node: Dashboard103434
+Node: Opening the Dashboard103904
+Node: Study Activity and History104378
+Node: The Themata View106824
+Node: The Nodes View107395
+Node: Topic Study and Repair Views108485
+Node: The Tags View110921
+Node: Export and Import111264
+Node: Database Upgrades and Rollback111792
+Node: Full Backups Versus Content Exports116100
+Node: Exporting120432
+Node: Tag Filter Notation121019
+Node: Programmatic Use121392
+Node: Importing121624
+Node: The Export Format122365
+Node: Editing Themata (Org Format)122756
+Node: Importing from Anki123229
+Node: What Gets Imported124104
+Node: What Does Not Transfer124551
+Node: Requirements (1)124888
+Node: Link Health and Maintenance125279
+Node: Checking Link Health125843
+Node: Full Synchronisation126088
+Node: Syncing the Node Database126437
+Node: Version Control (1)126871
 
 End Tag Table
 
