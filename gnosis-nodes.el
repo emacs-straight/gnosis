@@ -167,8 +167,9 @@ When NODE-IDS is non-nil, return only IDs in that list."
 
 (defvar-local gnosis-nodes--deleted-file nil
   "File and database of a deleted node retained in this recovery buffer.
-The value is (FILE DATABASE).  The buffer no longer visits FILE, so an
-ordinary save cannot silently recreate the deleted file.")
+The value is (FILE DATABASE), optionally followed by journal index
+filenames and their rows before deletion.  The buffer no longer visits
+FILE, so an ordinary save cannot silently recreate the deleted file.")
 
 (defun gnosis-nodes--file-buffer (file)
   "Return FILE's visiting buffer or its detached deletion recovery buffer."
@@ -176,7 +177,7 @@ ordinary save cannot silently recreate the deleted file.")
       (seq-find (lambda (buffer)
                   (with-current-buffer buffer
                     (and (not buffer-file-name)
-                         (equal gnosis-nodes--deleted-file
+                         (equal (seq-take gnosis-nodes--deleted-file 2)
                                 (list (expand-file-name file) gnosis-db)))))
                 (buffer-list))))
 
@@ -251,14 +252,15 @@ same-basename source survives.  Never use a successor buffer as evidence."
                                (gnosis-nodes--files)))))
           (user-error "Unresolved basename node index; run gnosis-nodes-db-force-sync (index-only rebuild)"))))))
 
-(defun gnosis-nodes--journal-ownership (file &optional info)
+(defun gnosis-nodes--journal-ownership (file &optional info journal)
   "Resolve ordinary rows belonging to the journal affected by FILE.
 Return (JOURNAL-FILE OWNED-IDS CURRENT-IDS), or nil if no related ordinary
 rows exist.  INFO is FILE's parsed replacement, when available.
 An explicit relative path owns its whole snapshot even after IDs change
 or the file disappears.  Basename rows still need legacy owner evidence.
-Use this same resolution before physical deletion and index cleanup."
-  (let* ((journal-p (gnosis-nodes--journal-file-p file))
+Use this same resolution before physical deletion and index cleanup.
+JOURNAL retains FILE's journal classification across physical deletion."
+  (let* ((journal-p (or journal (gnosis-nodes--journal-file-p file)))
          (journal-file
           (if journal-p file
             (when-let* ((single (progn
@@ -303,40 +305,74 @@ Signal parsing or storage errors without changing the previous index."
        (if journal 'journal 'nodes) (gnosis-nodes--file-key full-path journal)
        mtime info))))
 
-(defun gnosis-nodes--delete-file (&optional file preserve-incoming info)
+(defun gnosis-nodes--journal-indexed-file-p (file)
+  "Return non-nil for journal FILE or its missing retained index path.
+An exact index filename remains evidence after unlinking an external alias;
+do not infer ownership from an ID shared with another physical file."
+  (or (gnosis-nodes--journal-file-p file)
+      (and file (not (file-exists-p file))
+           (gnosis-nodes-select 'id 'journal
+                                `(= file ,(gnosis-nodes--file-key file t))))))
+
+(defun gnosis-nodes--journal-index-files (file)
+  "Return index filenames owned by journal FILE, including physical aliases.
+Keep FILE's own key even without rows, for cleanup after physical deletion.
+Only filesystem identity, never shared IDs or hashes, establishes an alias."
+  (let ((key (gnosis-nodes--file-key file t))
+        (directory (gnosis-nodes--journal-dir)))
+    (cons key
+          (seq-filter
+           (lambda (other)
+             (and (not (equal key other))
+                  (file-equal-p file (expand-file-name other directory))))
+           (mapcar #'car (gnosis-sqlite-select
+                          (gnosis--ensure-db) "SELECT DISTINCT file FROM journal"))))))
+
+(defun gnosis-nodes--delete-file (&optional file preserve-incoming info journal-owner)
   "Delete contents for FILE in database.
 Removes node rows, associated links, and tags.
 When PRESERVE-INCOMING is non-nil, retain links from other files.
 INFO, when non-nil, is FILE's parsed replacement for journal adoption.
+JOURNAL-OWNER is (FILENAMES ROWS), captured before physical deletion.
 Reconcile journal ownership and check ordinary basename ownership before
 erasing evidence; refuse unresolved ownership without changing the index."
   (let* ((file (or file (buffer-file-name)))
-         (journal-p (gnosis-nodes--journal-file-p file))
-         (filename (gnosis-nodes--file-key file journal-p)))
+         (journal-p (or journal-owner (gnosis-nodes--journal-indexed-file-p file))))
     (gnosis-sqlite-with-transaction (gnosis--ensure-db)
-      (pcase (gnosis-nodes--journal-ownership file info)
-        (`(,journal-file ,owned ,ids)
-         (if journal-p
-             (dolist (id owned)
-               ;; Tags and outgoing links cascade; only survivors keep backlinks.
-               (gnosis-nodes--delete 'nodes `(= id ,id))
-               (unless (and preserve-incoming (member id ids))
-                 (gnosis-nodes--delete 'node-links `(= dest ,id))))
-           (when owned
-             ;; Use the index operation, never the journal's TODO save hook.
-             (gnosis-nodes--update-file
-              journal-file t (gnosis-nodes--file-buffer journal-file))))))
-      ;; Resolve rows only after adoption, so an ordinary namesake cannot
-      ;; delete the journal rows or their surviving incoming links.
-      (unless journal-p
-        (gnosis-nodes--check-node-ownership file nil (not info)))
-      (dolist (node (gnosis-nodes-select
-                    'id (if journal-p 'journal 'nodes) `(= file ,filename) t))
-        (gnosis-nodes--delete (if journal-p 'journal 'nodes) `(= id ,node))
-        (gnosis-nodes--delete 'node-tag `(= node-id ,node))
-        (gnosis-nodes--delete 'node-links `(= source ,node))
-        (unless preserve-incoming
-          (gnosis-nodes--delete 'node-links `(= dest ,node)))))))
+      (let* ((ownership (gnosis-nodes--journal-ownership file info journal-p))
+             ;; Ownership parsing can run Org hooks.  Resolve aliases afterward.
+             (filenames (if journal-p
+                            (or (car journal-owner) (gnosis-nodes--journal-index-files file))
+                          (list (gnosis-nodes--file-key file nil)))))
+        (when (and journal-owner
+                   (not (equal (cadr journal-owner)
+                               (gnosis-nodes-select '* 'journal
+                                                    `(in file ,(vconcat filenames))))))
+          (user-error "Journal index changed since deletion; sync surviving files"))
+        (pcase ownership
+          (`(,journal-file ,owned ,ids)
+           (if journal-p
+               (dolist (id owned)
+                 ;; Tags and outgoing links cascade; only survivors keep backlinks.
+                 (gnosis-nodes--delete 'nodes `(= id ,id))
+                 (unless (and preserve-incoming (member id ids))
+                   (gnosis-nodes--delete 'node-links `(= dest ,id))))
+             (when owned
+               ;; Use the index operation, never the journal's TODO save hook.
+               (gnosis-nodes--update-file
+                journal-file t (gnosis-nodes--file-buffer journal-file))))))
+        ;; Resolve rows only after adoption, so an ordinary namesake cannot
+        ;; delete the journal rows or their surviving incoming links.
+        (unless journal-p
+          (gnosis-nodes--check-node-ownership file nil (not info)))
+        (dolist (node (gnosis-nodes-select
+                      'id (if journal-p 'journal 'nodes)
+                      `(in file ,(vconcat filenames)) t))
+          (gnosis-nodes--delete (if journal-p 'journal 'nodes) `(= id ,node))
+          (gnosis-nodes--delete 'node-tag `(= node-id ,node))
+          (gnosis-nodes--delete 'node-links `(= source ,node))
+          (unless preserve-incoming
+            (gnosis-nodes--delete 'node-links `(= dest ,node))))))))
 
 (defun gnosis-nodes-update-file (&optional file index-only)
   "Update contents of FILE in database.
@@ -354,8 +390,9 @@ Unresolved basename ownership requires `gnosis-nodes-db-force-sync'."
 
 (defun gnosis-nodes--check-delete-ownership (file)
   "Validate retained index ownership before physically deleting FILE."
-  (let ((ownership (gnosis-nodes--journal-ownership file)))
-    (unless (gnosis-nodes--journal-file-p file)
+  (let* ((journal (gnosis-nodes--journal-indexed-file-p file))
+         (ownership (gnosis-nodes--journal-ownership file nil journal)))
+    (unless journal
       (gnosis-nodes--check-node-ownership file (cadr ownership) t))))
 
 ;;;###autoload
@@ -363,6 +400,8 @@ Unresolved basename ownership requires `gnosis-nodes-db-force-sync'."
   "Confirm and delete FILE and its node index, then close its buffer.
 Default FILE to the current buffer's file.  Explicit FILE need not be
 visited or current.  Other files and their buffers are not deleted.
+If Emacs visits a journal through another name, delete from that buffer
+instead; unlinking its alias would lose ownership needed for cleanup retry.
 Filesystem deletion precedes the index transaction: these are not atomic.
 A file error or quit before deletion leaves the index intact.  If the file
 is gone but index cleanup fails, retain its buffer and report reconciliation
@@ -375,10 +414,16 @@ requires `gnosis-nodes-db-force-sync'."
   (let* ((recovery (and (not file) (not (buffer-file-name))
                         gnosis-nodes--deleted-file))
          (target (or file (buffer-file-name) (car recovery)))
-         (file (and target (expand-file-name target))))
+         (file (and target (expand-file-name target)))
+         (recovery
+          (or recovery
+              (when-let* ((buffer (and file (gnosis-nodes--file-buffer file))))
+                (with-current-buffer buffer
+                  (and (not buffer-file-name) gnosis-nodes--deleted-file))))))
     (unless (and file
                  (or (file-in-directory-p file gnosis-nodes-dir)
-                     (gnosis-nodes--journal-file-p file)))
+                     (and recovery (equal file (car recovery)))
+                     (gnosis-nodes--journal-indexed-file-p file)))
       (user-error "%s is not a gnosis node file" target))
     (when (file-directory-p file)
       (user-error "%s is a directory, not a node file" file))
@@ -392,16 +437,40 @@ requires `gnosis-nodes-db-force-sync'."
                        (format "File missing; reconcile index for %s? " file)))
         ;; Retain source evidence for legacy ownership and recovery until the
         ;; index commits, including when FILE was not previously visited.
-        (let ((buffer (or (gnosis-nodes--file-buffer file)
-                          (and exists (find-file-noselect file)))))
-          (gnosis-nodes--check-delete-ownership file)
+        (let* ((buffer (or (gnosis-nodes--file-buffer file)
+                           (and exists (find-file-noselect file))))
+               ;; Resolve aliases after file/Org callbacks, before unlinking
+               ;; destroys physical identity.
+               (journal-files
+                (progn
+                  (gnosis-nodes--check-delete-ownership file)
+                  (when (and (gnosis-nodes--journal-indexed-file-p file)
+                             buffer (buffer-file-name buffer)
+                             (not (equal file (buffer-file-name buffer))))
+                    (user-error "Journal is visited as %s; delete from that buffer"
+                                (buffer-file-name buffer)))
+                  (or (when (and (not exists) buffer)
+                        (with-current-buffer buffer
+                          (nth 2 gnosis-nodes--deleted-file)))
+                      (when (gnosis-nodes--journal-indexed-file-p file)
+                        (gnosis-nodes--journal-index-files file)))))
+               (journal-rows
+                (and journal-files
+                     (gnosis-nodes-select '* 'journal
+                                          `(in file ,(vconcat journal-files))))))
+          (when (and (not exists) buffer)
+            (with-current-buffer buffer
+              (when (and (nth 2 gnosis-nodes--deleted-file)
+                         (not (equal journal-rows (nth 3 gnosis-nodes--deleted-file))))
+                (user-error "Journal index changed since deletion; sync surviving files"))))
           (unless (equal exists (or (file-exists-p file) (file-symlink-p file)))
             (user-error "File existence changed; retry deletion of %s" file))
           (unwind-protect
               (condition-case err
                   (progn
                     (when exists (delete-file file))
-                    (gnosis-nodes--delete-file file))
+                    (gnosis-nodes--delete-file
+                     file nil nil (and journal-files (list journal-files journal-rows))))
                 ((error quit)
                  (if (or (file-exists-p file) (file-symlink-p file))
                      (signal (car err) (cdr err))
@@ -419,7 +488,10 @@ requires `gnosis-nodes-db-force-sync'."
                       (change-major-mode-with-file-name nil))
                   (when (buffer-file-name)
                     (set-visited-file-name nil t))
-                  (setq gnosis-nodes--deleted-file (list file gnosis-db))))))
+                  (setq gnosis-nodes--deleted-file
+                        (append (list file gnosis-db)
+                                (and journal-files
+                                     (list journal-files journal-rows))))))))
           (if (and (buffer-live-p buffer)
                    (eq buffer (gnosis-nodes--file-buffer file))
                    (not (kill-buffer buffer)))
@@ -484,15 +556,58 @@ EXTRAS: The template to be inserted at the start."
       (gnosis-nodes-mode 1))))
 
 (defun gnosis-nodes-find--with-tags (&optional prompt entries)
-  "Select gnosis node with tags from ENTRIES.
-PROMPT: Prompt message."
-  (replace-regexp-in-string
-   "  #[^[:space:]]+" ""
-   (funcall gnosis-nodes-completing-read-func
-	    (or prompt "Select gnosis node: ")
-	    (gnosis-nodes-find--tag-with-tag-prop
-	     (or entries
-		 (gnosis-nodes-select '[title tags] 'nodes))))))
+  "Select a node title from tagged ENTRIES using PROMPT.
+ENTRIES contains (TITLE TAGS) rows.  Preserve literal title text."
+  (let* ((rows (or entries (gnosis-nodes-select '[title tags] 'nodes)))
+         (candidates (cl-mapcar #'cons
+                               (gnosis-nodes-find--tag-with-tag-prop rows)
+                               (mapcar #'car rows)))
+         (choice (funcall gnosis-nodes-completing-read-func
+                          (or prompt "Select gnosis node: ")
+                          (mapcar #'car candidates))))
+    (or (cdr (assoc choice candidates)) choice)))
+
+(defun gnosis-nodes--completion-candidates (rows &optional show-tags)
+  "Return an alist of unique labels and IDs for ROWS.
+ROWS contains (ID TITLE FILE TAGS) lists; TAGS may be omitted.
+When SHOW-TAGS is non-nil, include tags in labels.  Distinguish duplicate
+labels by file, then occurrence, reserving literal labels first."
+  (let* ((labels (if show-tags
+                     (gnosis-nodes-find--tag-with-tag-prop
+                      (mapcar (lambda (row) (list (cadr row) (nth 3 row))) rows))
+                   (mapcar #'cadr rows)))
+         (counts (make-hash-table :test #'equal))
+         (used (make-hash-table :test #'equal)))
+    (dolist (label labels)
+      (puthash label (1+ (gethash label counts 0)) counts)
+      (puthash label t used))
+    (cl-mapcar
+     (lambda (row title)
+       (cons (if (= 1 (gethash title counts)) title
+               (let* ((base (format "%s — %s" title (nth 2 row)))
+                      (label (cl-loop for n from 1
+                                      for candidate = (if (= n 1) base
+                                                        (format "%s <%d>" base n))
+                                      unless (gethash candidate used)
+                                      return candidate)))
+                 (puthash label t used)
+                 label))
+             (car row)))
+     rows labels)))
+
+(defun gnosis-nodes--read-node (prompt rows &optional require-match)
+  "Read a node with PROMPT, retaining the selected row from ROWS.
+ROWS contains (ID TITLE FILE TAGS) lists.  Also accept a literal title
+from ROWS for existing completion customizations.  Return (nil NEW-TITLE)
+for unmatched input unless REQUIRE-MATCH is non-nil."
+  (let* ((candidates (gnosis-nodes--completion-candidates rows gnosis-nodes-show-tags))
+         (choice (funcall gnosis-nodes-completing-read-func
+                          prompt (mapcar #'car candidates)))
+         (id (cdr (assoc choice candidates))))
+    (or (assoc id rows)
+        (cl-find choice rows :key #'cadr :test #'equal)
+        (if require-match (user-error "No node selected")
+          (list nil choice)))))
 
 (defun gnosis-nodes--find (prompt entries-with-tags entries)
   "PROMPT user to select from ENTRIES.
@@ -507,28 +622,31 @@ instead."
 
 ;;;###autoload
 (defun gnosis-nodes-find (&optional title file id directory templates)
-  "Select gnosis node.
-If there is no ID for TITLE, create a new FILE with TITLE as TOPIC in
-DIRECTORY."
+  "Select a node by ID, or create a new FILE for an unmatched TITLE.
+Use DIRECTORY and TEMPLATES for creation.  An explicit ID takes precedence
+over TITLE and never creates a new node."
   (interactive)
   (gnosis-nodes-ensure-directories)
-  (let* ((title (or title (if gnosis-nodes-show-tags
-			      (gnosis-nodes-find--with-tags)
-			    (funcall gnosis-nodes-completing-read-func
-				     "Select gnosis node: "
-				     (gnosis-nodes-select 'title 'nodes)))))
-	 (file (or file (caar (gnosis-nodes-select 'file 'nodes `(= title ,title)))))
-	 (id (or id (caar (gnosis-nodes-select 'id 'nodes `(= title ,title)))))
-	 (directory (or directory gnosis-nodes-dir))
-	 (templates (or templates gnosis-nodes-templates)))
-    (cond ((null file)
-	   (gnosis-nodes--create-file title directory
-				      (gnosis-nodes-select-template templates)))
-	  ((file-exists-p (expand-file-name file directory))
-	   (gnosis-nodes-goto-id id))
-	  (t (error "File %s does not exist.  \
-Try `gnosis-nodes-db-force-sync' to resolve this"
-		    file)))))
+  (let* ((node (cond (id (car (gnosis-nodes-select
+                              '[id title file tags] 'nodes `(= id ,id))))
+                     (title (car (gnosis-nodes-select
+                                  '[id title file tags] 'nodes `(= title ,title))))
+                     (t (gnosis-nodes--read-node
+                         "Select gnosis node: "
+                         (gnosis-nodes-select '[id title file tags] 'nodes)))))
+         (title (or (cadr node) title))
+         (file (or file (nth 2 node)))
+         (id (or id (car node)))
+         (directory (or directory gnosis-nodes-dir)))
+    (cond ((and id (not file)) (user-error "No indexed file for node %s" id))
+          ((null file)
+           (gnosis-nodes--create-file
+            title directory (gnosis-nodes-select-template
+                             (or templates gnosis-nodes-templates))))
+          ((file-exists-p (expand-file-name file directory))
+           (gnosis-nodes-goto-id id))
+          (t (error "File %s does not exist.  \
+Try `gnosis-nodes-db-force-sync' to resolve this" file)))))
 
 (defun gnosis-nodes--nodes-by-tag (tag)
   "Return all node IDs associated with TAG.
@@ -543,11 +661,11 @@ Uses the node-tag junction table for proper querying."
 			       "Select tag: "
 			       (gnosis-nodes--all-tags))))
 	 (nodes-ids (gnosis-nodes--nodes-by-tag tag))
-	 (node-titles (gnosis-nodes-select
-		       'title 'nodes
-		       `(in id ,(vconcat nodes-ids)) t))
-	 (node (completing-read "Select node: " node-titles nil t)))
-    (gnosis-nodes-find node)))
+         (node (gnosis-nodes--read-node
+                "Select node: "
+                (gnosis-nodes-select '[id title file tags] 'nodes
+                                     `(in id ,(vconcat nodes-ids))) t)))
+    (gnosis-nodes-find (cadr node) (nth 2 node) (car node))))
 
 (defun gnosis-nodes--journal-file-p (file)
   "Return non-nil if FILE belongs to the configured journal."
@@ -607,16 +725,17 @@ the appropriate template list."
 
 ;;;###autoload
 (defun gnosis-nodes-insert (arg &optional journal-p)
-  "Insert gnosis node link.
-If called with ARG, prompt for custom link description.
+  "Insert a gnosis node link with its full indexed title as description.
+If called with ARG, prompt for a custom description; an active region
+supplies the description instead.  Preserve the insertion origin.
 If JOURNAL-P is non-nil, retrieve/create node as a journal entry."
   (interactive "P")
   (let* ((table (if journal-p 'journal 'nodes))
-         (node (gnosis-nodes--find "Select gnosis node: "
-                                   (gnosis-nodes-select '[title tags] table)
-                                   (gnosis-nodes-select 'title table)))
-         (id (car (gnosis-nodes-select 'id table `(= title ,node) t)))
-	 (title (car (last (split-string node ":"))))
+         (node (gnosis-nodes--read-node
+                "Select gnosis node: "
+                (gnosis-nodes-select '[id title file tags] table)))
+         (id (car node))
+         (title (cadr node))
          (desc (cond ((use-region-p)
                       (buffer-substring-no-properties
                        (region-beginning) (region-end)))
@@ -624,14 +743,16 @@ If JOURNAL-P is non-nil, retrieve/create node as a journal entry."
                      (t title))))
     (unless id
       (save-window-excursion
-        (gnosis-nodes--create-file
-         node (if journal-p
-                  (gnosis-nodes--journal-dir)
-                gnosis-nodes-dir))
-        (save-buffer)
-        (setf id (car (gnosis-nodes-select 'id table `(= title ,node) t)))))
-    (org-insert-link nil (format "id:%s" id) desc)
-    (unless id (message "Created new node: %s" node))))
+        (save-excursion
+          (save-restriction
+            (gnosis-nodes--create-file
+             title (if journal-p (gnosis-nodes--journal-dir) gnosis-nodes-dir))
+            (save-buffer)
+            (widen)
+            (goto-char (point-min))
+            (setq id (org-id-get))))))
+    (unless id (user-error "Node %s has no root ID" title))
+    (org-insert-link nil (format "id:%s" id) desc)))
 
 (defun gnosis-nodes--filetags ()
   "Return list of current filetags, or nil, ignoring narrowing."
@@ -696,14 +817,14 @@ At a heading, add TAG to heading tags.  Otherwise, add to #+FILETAGS."
   (interactive)
   (let* ((id (gnosis-org-get-id))
 	 (source-ids (gnosis-nodes-select 'source 'node-links `(= dest ,id) t))
-	 (titles (when source-ids
-		   (mapcar #'car
-			   (gnosis-sqlite-select-batch (gnosis--ensure-db)
-						       "SELECT title FROM nodes WHERE id IN (%s)"
-						       source-ids)))))
-    (if titles
-	(gnosis-nodes-find
-	 (completing-read "Backlink: " titles))
+	 (rows (when source-ids
+                 (gnosis-sqlite-select-batch
+                  (gnosis--ensure-db)
+                  "SELECT id, title, file, tags FROM nodes WHERE id IN (%s)"
+                  source-ids))))
+    (if rows
+        (let ((node (gnosis-nodes--read-node "Backlink: " rows t)))
+          (gnosis-nodes-find (cadr node) (nth 2 node) (car node)))
       (message "No backlinks found for current node"))))
 
 (defun gnosis-nodes-get-nodes-data (&optional node-ids)
@@ -743,7 +864,7 @@ Returns a list of (ID TITLE BACKLINK-COUNT) for each node."
 
 (defun gnosis-nodes-goto-id (&optional id)
   "Visit file for ID.
-Enable `gnosis-nodes-mode' for a resolved node or journal destination.
+Enable `gnosis-nodes-mode' and widen a resolved node or journal destination.
 If file or id are not found, use `org-open-at-point' without changing modes.
 Refuse unresolved basename ownership before visiting another file."
   (interactive)
@@ -760,6 +881,7 @@ Refuse unresolved basename ownership before visiting another file."
 	      (expand-file-name
                (car (gnosis-nodes-select 'file 'nodes `(= id ,id) t))
 	       gnosis-nodes-dir))
+             (widen)
 	     (org-id-goto id)
              (gnosis-nodes-mode 1))
 	    ((gnosis-nodes-select 'file 'journal `(= id ,id))
@@ -768,6 +890,7 @@ Refuse unresolved basename ownership before visiting another file."
 	       (car (gnosis-nodes-select 'file 'journal
 				         `(= id ,id) t))
 	       (gnosis-nodes--journal-dir)))
+             (widen)
 	     (org-id-goto id)
              (gnosis-nodes-mode 1))
             ((progn
