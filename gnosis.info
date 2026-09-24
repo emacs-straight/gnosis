@@ -178,6 +178,7 @@ Type-Specific Review Behaviour
 
 Topic and Subtree Study
 
+* Ordered Related Groups::
 * Scheduled Review After Practice::
 * Practice Completion Notifications::
 * Legacy Review Ahead::
@@ -1595,14 +1596,18 @@ behavior.  Unavailable managed pixels stop the encounter rather than
 recording an incorrect answer.
 
    The attachment includes an actionable ‘gnosis-lecture:’ citation to
-the original path and physical page.  During review, choose *View
-source* from the normal actions, then select the lecture.  Return with
-‘C-c C-c’ to the same pending answer.  PDFs open through native DocView
-or configured pdf-tools; ‘pdfinfo’ (also from Poppler) verifies the
-physical page before navigation.  The citation is a local external
-reference, not an archived lecture: moving or replacing the original can
-make it unavailable or change its contents.  Keep originals separately.
-Missing originals do not prevent review of the managed extracted image.
+the original path and physical page.  In practice or scheduled review,
+*View source* in the normal post-answer actions (‘v’) is optional: a
+sole source opens directly, and multiple linked nodes or lectures use
+completion.  Return with ‘C-c C-c’ to the same pending answer;
+cancelling the source picker likewise returns without accepting or
+changing that answer.  There is no mandatory source introduction or
+separate learning mode.  PDFs open through native DocView or configured
+pdf-tools; ‘pdfinfo’ (also from Poppler) verifies the physical page
+before navigation.  The citation is a local external reference, not an
+archived lecture: moving or replacing the original can make it
+unavailable or change its contents.  Keep originals separately.  Missing
+originals do not prevent review of the managed extracted image.
 
    SQLite content export includes the managed illustration, its
 immutable manifest and citation.  Import validates the bundled bytes
@@ -2366,14 +2371,71 @@ heading.
 
 * Menu:
 
+* Ordered Related Groups::
 * Scheduled Review After Practice::
 * Practice Completion Notifications::
 * Legacy Review Ahead::
 
 
-File: gnosis.info,  Node: Scheduled Review After Practice,  Next: Practice Completion Notifications,  Up: Topic and Subtree Study
+File: gnosis.info,  Node: Ordered Related Groups,  Next: Scheduled Review After Practice,  Up: Topic and Subtree Study
 
-6.8.1 Scheduled Review After Practice
+6.8.1 Ordered Related Groups
+----------------------------
+
+The optional ‘gnosis-agent’ library can reserve a native batch in a
+chosen group order, without answering for the learner:
+
+     (require 'gnosis-agent)
+     (gnosis-agent-start-practice-groups
+      :tags '("amino_acids" "proteins") :limit 30
+      :policy '(:successes-required 1 :successes-after-failure 1
+                :max-attempts-per-thema nil))
+     ;; A separate scheduled batch, restricted to currently due items:
+     (gnosis-agent-start-review-groups
+      :tags '("amino_acids" "proteins") :limit 30)
+     ;; Alternatively, retain explicit within-group order (use actual thema IDs):
+     (gnosis-agent-start-practice-groups
+      :thema-groups '((103 101) (102 105)) :limit 4)
+
+   Supply either an ordered list of tags or an ordered list of ID lists,
+not both.  Each tag is a group, with its members in ascending ID order.
+Explicit ID lists retain their order.  First membership wins overlaps;
+no thema receives a duplicate initial presentation.  Missing and
+suspended items are excluded; scheduled review also excludes not-yet-due
+items.  Like explicitly selected topic review, this scheduled API
+ignores the global new-item cap, but never forces future-due cards into
+review.  The required positive ‘:limit’ caps unique eligible items
+across all groups.
+
+   The returned API v1 status includes ‘:session-id’, ‘:selected-ids’,
+‘:remaining-ids’ and ‘:selection’.  Selection contains a ‘:groups’
+vector with each group's ‘:tag’ (nil for explicit IDs),
+‘:requested-ids’, ‘:overlap-ids’, ‘:excluded-ids’, ‘:omitted-ids’ (by
+the limit), and ‘:selected-ids’.  Unmatched tags and empty groups remain
+visible with no selected members.  Entirely empty selections return a
+history-only report without replacing an unfinished batch.  Invalid
+input changes no batch.
+
+   Initial presentations follow group order.  Failed retries retain the
+existing spacing rule, and successful practice continuations retain
+their frozen policy; either can cross group boundaries.  Groups are not
+mastery barriers, and grouping does not alter retry distance.
+Membership, original groups and the actual remaining queue persist
+across restart.  Resume does not re-resolve changed tags or reorder
+retained retries.
+
+   Native ‘gnosis-review-resume’ and ‘gnosis-agent-resume’ resume the
+same batch.  Use ‘gnosis-agent-status’ with its exact session ID for
+either mode; ‘gnosis-agent-cancel’ ends an interrupted batch without
+deleting evidence.  ‘gnosis-agent-results’ supplies detailed practice
+evidence only.  Practice never updates FSRS.  Scheduled acceptance uses
+the normal FSRS path; merely reserving a batch or opening a source
+records no grade.
+
+
+File: gnosis.info,  Node: Scheduled Review After Practice,  Next: Practice Completion Notifications,  Prev: Ordered Related Groups,  Up: Topic and Subtree Study
+
+6.8.2 Scheduled Review After Practice
 -------------------------------------
 
 A completed, nonempty practice summary offers a *Scheduled review*
@@ -2401,7 +2463,7 @@ again to inspect the new counts.
 
 File: gnosis.info,  Node: Practice Completion Notifications,  Next: Legacy Review Ahead,  Prev: Scheduled Review After Practice,  Up: Topic and Subtree Study
 
-6.8.2 Practice Completion Notifications
+6.8.3 Practice Completion Notifications
 ---------------------------------------
 
 ‘gnosis-practice-completed-hook’ is an optional, agent-neutral hook.
@@ -2466,7 +2528,7 @@ as immutable answer evidence.
 
 File: gnosis.info,  Node: Legacy Review Ahead,  Prev: Practice Completion Notifications,  Up: Topic and Subtree Study
 
-6.8.3 Legacy Review Ahead
+6.8.4 Legacy Review Ahead
 -------------------------
 
 ‘gnosis-review-topic’ retains its schedule-affecting semantics.  It
@@ -3132,134 +3194,135 @@ automatic commits:
 
 Tag Table:
 Node: Top229
-Node: Introduction4300
-Node: Why Gnosis5166
-Node: The Two Subsystems6123
-Node: Nodes6363
-Node: Themata6899
-Node: The Link Between Nodes and Themata8377
-Node: Greek Terminology Reference9115
-Node: Data Storage9939
-Node: Installation and Setup10569
-Node: Requirements10939
-Node: Installing from GNU ELPA11516
-Node: Basic Configuration11875
-Node: Key Directories12650
-Node: gnosis-dir12901
-Node: gnosis-nodes-dir13317
-Node: gnosis-journal-dir14411
-Node: Database Upgrade Compatibility14856
-Node: Version Control15536
-Node: Completing Read Integration16119
-Node: Full Example Configuration16700
-Node: Nodes (1)17212
-Node: What Makes an Org Heading a Node18039
-Node: Creating and Finding Nodes18698
-Node: gnosis-nodes-find18955
-Node: gnosis-nodes-find-by-tag19542
-Node: File Naming19897
-Node: gnosis-nodes-timestring20337
-Node: GPG Encryption21135
-Node: Displaying Tags in Completion21613
-Node: Templates22183
-Node: gnosis-nodes-templates22573
-Node: The {*} Heading Marker23875
-Node: Inserting a Template Manually24842
-Node: Automatic Sync25220
-Node: Manual Sync25652
-Node: Force Rebuild26223
-Node: Deleting a Node File26484
-Node: Links Between Nodes27748
-Node: Backlinks28632
-Node: Tags28993
-Node: Adding Tags29477
-Node: Journal30083
-Node: Creating Entries30692
-Node: gnosis-journal30881
-Node: gnosis-journal-find31100
-Node: File vs Single-File Mode31566
-Node: Single Journal File (Default)31837
-Node: GPG Encryption (1)33030
-Node: Templates (1)33413
-Node: gnosis-journal-templates33715
-Node: ``TODO'' Integration34447
-Node: gnosis-journal-todo-files34932
-Node: gnosis-journal-todo-keywords35271
-Node: Bullet Point Character35919
-Node: How Task Collection Works36390
-Node: Completing source tasks36975
-Node: Dated navigation37473
-Node: Command map38067
-Node: Inserting Journal Links38727
-Node: Full Journal Configuration Example39127
-Node: Themata (Spaced Repetition Cards)39999
-Node: Fields of a Thema40802
-Node: Thema Types42107
-Node: Basic42486
-Node: Agent-eval42901
-Node: Double46213
-Node: MCQ (Multiple Choice Question)46585
-Node: Cloze47035
-Node: MC-cloze (Multiple Choice Cloze)47701
-Node: Accepted aliases (1)48113
-Node: Accepted aliases48497
-Node: Images regions and occlusion50037
-Node: Lecture illustrations in Parathema55228
-Node: Models Find and Name57668
-Ref: Optional canvas backend65942
-Ref: Reviewing or practising a model68640
-Ref: Exchange and backup limits70991
-Node: Creating Themata71755
-Node: Editing Themata73968
-Node: Tags on Themata75292
-Node: The Link Between Themata and Nodes75787
-Node: Suspending Themata76615
-Node: Review System76989
-Node: Starting a Review Session77731
-Node: Finite Batches and Summaries79163
-Node: Tag Filtering80541
-Node: The Review Flow81008
-Node: Resume Continue Discard and Undo83998
-Node: Scheduling and Retention87061
-Node: Type-Specific Review Behaviour90373
-Node: Basic (1)90660
-Node: MCQ92174
-Node: Cloze (1)92473
-Node: MC-cloze92880
-Node: Topic and Subtree Study93133
-Node: Scheduled Review After Practice95402
-Node: Practice Completion Notifications96859
-Node: Legacy Review Ahead100208
-Node: Activity Logging100967
-Node: Monkeytype101417
-Node: Sample Configuration102173
-Node: Logical Review Day102531
-Node: Day Boundary102699
-Node: Dashboard103434
-Node: Opening the Dashboard103904
-Node: Study Activity and History104378
-Node: The Themata View106824
-Node: The Nodes View107395
-Node: Topic Study and Repair Views108485
-Node: The Tags View110921
-Node: Export and Import111264
-Node: Database Upgrades and Rollback111792
-Node: Full Backups Versus Content Exports116100
-Node: Exporting120432
-Node: Tag Filter Notation121019
-Node: Programmatic Use121392
-Node: Importing121624
-Node: The Export Format122365
-Node: Editing Themata (Org Format)122756
-Node: Importing from Anki123229
-Node: What Gets Imported124104
-Node: What Does Not Transfer124551
-Node: Requirements (1)124888
-Node: Link Health and Maintenance125279
-Node: Checking Link Health125843
-Node: Full Synchronisation126088
-Node: Syncing the Node Database126437
-Node: Version Control (1)126871
+Node: Introduction4327
+Node: Why Gnosis5193
+Node: The Two Subsystems6150
+Node: Nodes6390
+Node: Themata6926
+Node: The Link Between Nodes and Themata8404
+Node: Greek Terminology Reference9142
+Node: Data Storage9966
+Node: Installation and Setup10596
+Node: Requirements10966
+Node: Installing from GNU ELPA11543
+Node: Basic Configuration11902
+Node: Key Directories12677
+Node: gnosis-dir12928
+Node: gnosis-nodes-dir13344
+Node: gnosis-journal-dir14438
+Node: Database Upgrade Compatibility14883
+Node: Version Control15563
+Node: Completing Read Integration16146
+Node: Full Example Configuration16727
+Node: Nodes (1)17239
+Node: What Makes an Org Heading a Node18066
+Node: Creating and Finding Nodes18725
+Node: gnosis-nodes-find18982
+Node: gnosis-nodes-find-by-tag19569
+Node: File Naming19924
+Node: gnosis-nodes-timestring20364
+Node: GPG Encryption21162
+Node: Displaying Tags in Completion21640
+Node: Templates22210
+Node: gnosis-nodes-templates22600
+Node: The {*} Heading Marker23902
+Node: Inserting a Template Manually24869
+Node: Automatic Sync25247
+Node: Manual Sync25679
+Node: Force Rebuild26250
+Node: Deleting a Node File26511
+Node: Links Between Nodes27775
+Node: Backlinks28659
+Node: Tags29020
+Node: Adding Tags29504
+Node: Journal30110
+Node: Creating Entries30719
+Node: gnosis-journal30908
+Node: gnosis-journal-find31127
+Node: File vs Single-File Mode31593
+Node: Single Journal File (Default)31864
+Node: GPG Encryption (1)33057
+Node: Templates (1)33440
+Node: gnosis-journal-templates33742
+Node: ``TODO'' Integration34474
+Node: gnosis-journal-todo-files34959
+Node: gnosis-journal-todo-keywords35298
+Node: Bullet Point Character35946
+Node: How Task Collection Works36417
+Node: Completing source tasks37002
+Node: Dated navigation37500
+Node: Command map38094
+Node: Inserting Journal Links38754
+Node: Full Journal Configuration Example39154
+Node: Themata (Spaced Repetition Cards)40026
+Node: Fields of a Thema40829
+Node: Thema Types42134
+Node: Basic42513
+Node: Agent-eval42928
+Node: Double46240
+Node: MCQ (Multiple Choice Question)46612
+Node: Cloze47062
+Node: MC-cloze (Multiple Choice Cloze)47728
+Node: Accepted aliases (1)48140
+Node: Accepted aliases48524
+Node: Images regions and occlusion50064
+Node: Lecture illustrations in Parathema55255
+Node: Models Find and Name57957
+Ref: Optional canvas backend66231
+Ref: Reviewing or practising a model68929
+Ref: Exchange and backup limits71280
+Node: Creating Themata72044
+Node: Editing Themata74257
+Node: Tags on Themata75581
+Node: The Link Between Themata and Nodes76076
+Node: Suspending Themata76904
+Node: Review System77278
+Node: Starting a Review Session78020
+Node: Finite Batches and Summaries79452
+Node: Tag Filtering80830
+Node: The Review Flow81297
+Node: Resume Continue Discard and Undo84287
+Node: Scheduling and Retention87350
+Node: Type-Specific Review Behaviour90662
+Node: Basic (1)90949
+Node: MCQ92463
+Node: Cloze (1)92762
+Node: MC-cloze93169
+Node: Topic and Subtree Study93422
+Node: Ordered Related Groups95718
+Node: Scheduled Review After Practice98607
+Node: Practice Completion Notifications100095
+Node: Legacy Review Ahead103444
+Node: Activity Logging104203
+Node: Monkeytype104653
+Node: Sample Configuration105409
+Node: Logical Review Day105767
+Node: Day Boundary105935
+Node: Dashboard106670
+Node: Opening the Dashboard107140
+Node: Study Activity and History107614
+Node: The Themata View110060
+Node: The Nodes View110631
+Node: Topic Study and Repair Views111721
+Node: The Tags View114157
+Node: Export and Import114500
+Node: Database Upgrades and Rollback115028
+Node: Full Backups Versus Content Exports119336
+Node: Exporting123668
+Node: Tag Filter Notation124255
+Node: Programmatic Use124628
+Node: Importing124860
+Node: The Export Format125601
+Node: Editing Themata (Org Format)125992
+Node: Importing from Anki126465
+Node: What Gets Imported127340
+Node: What Does Not Transfer127787
+Node: Requirements (1)128124
+Node: Link Health and Maintenance128515
+Node: Checking Link Health129079
+Node: Full Synchronisation129324
+Node: Syncing the Node Database129673
+Node: Version Control (1)130107
 
 End Tag Table
 

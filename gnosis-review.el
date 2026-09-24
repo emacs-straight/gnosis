@@ -258,7 +258,7 @@ Deferred callbacks must retain their own encounter context.")
         gnosis-review--layout nil))
 
 (defun gnosis-review--independent-layout-p (start end &optional string)
-  "Return non-nil if START to END contains independently laid out content.
+  "Return non-nil if positions START to END contain independent layout.
 Inspect STRING when non-nil, otherwise the current buffer.  Media and
 separators declare `gnosis-display-layout' as `independent'.  Also recognize
 native image and stretch-space specifications supplied by external media
@@ -541,19 +541,50 @@ SUCCESS controls the face used when overriding a previous display."
 (declare-function gnosis-lecture-sources "gnosis-lecture" (text))
 (declare-function gnosis-lecture-open "gnosis-lecture" (path &optional argument validate))
 
+(defvar gnosis-link-view--entry nil
+  "Entry occurrence consumed by the next source-view initialization.")
+
+(defvar-local gnosis-link-view--owner nil
+  "Source-view occurrence with buffer, prior header and installed header.")
+
+(defun gnosis-link-view--restore-header ()
+  "Retire the current source-view occurrence and restore its owned header."
+  (let ((owner gnosis-link-view--owner))
+    (setq gnosis-link-view--owner nil)
+    (when (and owner (eq header-line-format (nth 3 owner)))
+      (if (nth 1 owner)
+          (setq-local header-line-format (nth 2 owner))
+        (kill-local-variable 'header-line-format)))))
+
+(defun gnosis-link-view--cleanup (owner)
+  "Disable only the source-view occurrence identified by OWNER."
+  (when (buffer-live-p (car owner))
+    (with-current-buffer (car owner)
+      (when (eq owner gnosis-link-view--owner)
+        (gnosis-link-view-mode -1)))))
+
 (defun gnosis-view-linked-node (id &optional validate)
   "Visit linked nodes or external lecture sources for thema ID.
+When there is one source, visit it directly; otherwise ask with completion.
 When non-nil, call VALIDATE before and after navigation callbacks."
   (when validate (funcall validate))
   (let* ((ids (gnosis-select 'dest 'thema-links `(= source ,id) t))
-         (candidates (append (and ids (gnosis-study-topic-candidates ids))
-                             (progn
-                               (require 'gnosis-lecture)
-                               (gnosis-lecture-sources
-                                (gnosis-get 'parathema 'extras `(= id ,id)))))))
+         (sources (delete-dups
+                   (append (and ids (gnosis-study-topic-candidates ids))
+                           (progn
+                             (require 'gnosis-lecture)
+                             (gnosis-lecture-sources
+                              (gnosis-get 'parathema 'extras `(= id ,id)))))))
+         (labels (mapcar #'car sources))
+         (candidates (if (= (length labels) (length (delete-dups labels))) sources
+                       (cl-loop for (label . target) in sources for index from 1
+                                collect (cons (format "[%d] %s" index label) target)))))
     (unless candidates (user-error "No indexed source for this thema"))
-    (let ((node (cdr (assoc (completing-read "Source: " candidates nil t)
-                            candidates))))
+    (let ((node (if (null (cdr candidates))
+                    (cdar candidates)
+                  (cdr (assoc (completing-read "Source: " candidates nil t)
+                              candidates)))))
+      (unless node (user-error "No source selected"))
       (when validate (funcall validate))
       (window-configuration-to-register :gnosis-link-view)
       (when validate (funcall validate))
@@ -561,8 +592,16 @@ When non-nil, call VALIDATE before and after navigation callbacks."
           (gnosis-lecture-open (cdr node) nil validate)
         (gnosis-nodes-goto-id node))
       (when validate (funcall validate))
-      (gnosis-link-view-mode)
-      (when validate (funcall validate)))))
+      (let* ((entry (list (current-buffer)))
+             (gnosis-link-view--entry entry)
+             complete)
+        (unwind-protect
+            (progn
+              (gnosis-link-view-mode 1)
+              (when validate (funcall validate))
+              (setq complete t)
+              entry)
+          (unless complete (gnosis-link-view--cleanup entry)))))))
 
 (defun gnosis-link-view--exit ()
   "Exit link view mode."
@@ -580,10 +619,17 @@ When non-nil, call VALIDATE before and after navigation callbacks."
   :lighter " Gnosis Link View"
   :keymap gnosis-link-view-mode-map
   (if gnosis-link-view-mode
-      (setq-local header-line-format
-		  (substitute-command-keys
-		   " Return to review with: \\[gnosis-link-view--exit]"))
-    (setq-local header-line-format nil)))
+      (let ((owner (or gnosis-link-view--entry (list (current-buffer)))))
+        ;; Nested mode hooks must create their own occurrence.
+        (setq gnosis-link-view--entry nil)
+        (gnosis-link-view--restore-header)
+        (setcdr owner
+                (list (local-variable-p 'header-line-format) header-line-format
+                      (substitute-command-keys
+                       " Return to review with: \\[gnosis-link-view--exit]")))
+        (setq gnosis-link-view--owner owner)
+        (setq-local header-line-format (nth 3 owner)))
+    (gnosis-link-view--restore-header)))
 
 ;;; Due/scheduling
 
@@ -889,15 +935,22 @@ completion.  Invalidate deferred launches without invoking adapter code."
     (gnosis-review--save-session state)))
 
 (defun gnosis-review--reserve-practice (ids policy selection &optional target)
-  "Reserve IDS for native practice with frozen POLICY and SELECTION metadata.
+  "Reserve practice IDS with POLICY, SELECTION and optional checkpoint TARGET."
+  (gnosis-review--reserve-batch ids 'practice policy selection target))
+
+(defun gnosis-review--reserve-batch (ids mode policy selection &optional target)
+  "Reserve IDS in MODE with frozen POLICY and SELECTION metadata.
+MODE is `practice' or `due'; only practice accepts a POLICY.
 Return durable state without displaying a buffer or asking for an answer.
 Replace optional database/checkpoint TARGET, defaulting to the current batch.
 An empty selection retains only its report, leaving the current batch intact."
+  (unless (memq mode '(practice due)) (user-error "Unknown study mode"))
+  (when (and (eq mode 'due) policy) (user-error "Scheduled review has no practice policy"))
   (when gnosis-review--running (user-error "Finish the active review first"))
   (let* ((target (or target (gnosis-review--session-target)))
-         (policy (gnosis-review-practice-policy policy))
+         (policy (when (eq mode 'practice) (gnosis-review-practice-policy policy)))
          (state (gnosis-review-state-create
-                 :mode 'practice :persistent-p t :database (car target)
+                 :mode mode :persistent-p t :database (car target)
                  :session-id (gnosis-scheduler-event-id)
                  :event-id (gnosis-scheduler-event-id)
                  :basic-input gnosis-review-basic-input
@@ -2613,10 +2666,11 @@ Return unchanged (SUCCESS . RESULT) after source navigation."
             (progn (require 'gnosis-lecture)
                    (gnosis-lecture-sources (gnosis-get 'parathema 'extras `(= id ,thema)))))
         (condition-case err
-            (progn (gnosis-view-linked-node thema validate)
-                   (funcall validate)
-                   (recursive-edit))
-          (gnosis-lecture-error
+            (let ((entry (gnosis-view-linked-node thema validate)))
+              (unwind-protect
+                  (progn (funcall validate) (recursive-edit))
+                (gnosis-link-view--cleanup entry)))
+          ((gnosis-lecture-error user-error quit)
            (funcall validate)
            (pop-to-buffer origin)
            (message "%s" (error-message-string err))))
